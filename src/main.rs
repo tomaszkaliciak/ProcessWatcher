@@ -1,8 +1,11 @@
 use libc;
 
+use std::fs;
 use std::io;
 use std::mem;
 
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
@@ -52,7 +55,7 @@ impl App {
         let mut info_receiver = InfoReceiver::new();
 
         while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
+            // terminal.draw(|frame| self.draw(frame))?;
 
             self.handle_events();
 
@@ -137,7 +140,7 @@ impl InfoReceiver {
         std::thread::spawn(move || {
             rt.block_on(async move {
                 let task = tokio::spawn(async move {
-                    let mut interval = time::interval(Duration::from_secs(2));
+                    let mut interval = time::interval(Duration::from_secs(10));
                     loop {
                         interval.tick().await;
 
@@ -153,6 +156,41 @@ impl InfoReceiver {
                             } else {
                                 eprintln!("Failed to get system info.");
                             }
+
+                            let paths = fs::read_dir("/proc").unwrap();
+
+                            for path in paths {
+                                let pid_result: Result<i32, _> = path
+                                    .unwrap()
+                                    .path()
+                                    .file_name()
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap()
+                                    .parse();
+
+                                if let Ok(pid) = pid_result {
+                                    let status_path =
+                                        "/proc/".to_string() + pid.to_string().as_str() + "/status";
+
+                                    let mut contents = Vec::new();
+
+                                    if let Ok(file) =
+                                        tokio::fs::File::open(status_path).await.as_mut()
+                                    {
+                                        let _ = file.read_to_end(&mut contents).await;
+
+                                        let mut statm_result = Status::default();
+                                        let output = String::from_utf8(contents).unwrap();
+
+                                        let mut splitted = output.lines();
+                                        statm_result.name = splitted.nth(0).unwrap().to_string();
+                                        statm_result.vm_rss = splitted.nth(21).unwrap().to_string();
+
+                                        println!("PID: {:?}, status: {:?}", pid, statm_result)
+                                    }
+                                }
+                            }
                         }
                     }
                 });
@@ -162,4 +200,11 @@ impl InfoReceiver {
 
         InfoReceiver { reciver: recv }
     }
+}
+
+#[derive(Debug, Default)]
+pub struct Status {
+    pub name: String, // (0)
+    // pub vm_size: String,
+    pub vm_rss: String,
 }
