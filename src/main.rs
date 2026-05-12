@@ -3,34 +3,39 @@ use libc;
 use std::fs;
 use std::io;
 use std::mem;
+use std::num;
+use std::ops::Add;
 
+use crossterm::event::{self, KeyCode};
+use ratatui::style::Color;
+use ratatui::{
+    DefaultTerminal, Frame,
+    buffer::Buffer,
+    layout::Rect,
+    style::{Style, Stylize},
+    symbols::border,
+    text::{Line, Span, Text},
+    widgets::{Block, List, ListItem, Paragraph, Widget},
+};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
-use crossterm::event::{self, KeyCode};
-use ratatui::{
-    DefaultTerminal, Frame,
-    buffer::Buffer,
-    layout::Rect,
-    style::Stylize,
-    symbols::border,
-    text::{Line, Text},
-    widgets::{Block, Paragraph, Widget},
-};
-
+#[derive(Debug, Default)]
 pub struct MemInfo {
     total_memory: u64,
     free_memory: u64,
+    process_stats: Vec<ProcStatus>,
 }
 
 impl MemInfo {
-    pub fn send(state: (u64, u64)) -> MemInfo {
+    pub fn send(state: (u64, u64), proc_stats: Vec<ProcStatus>) -> MemInfo {
         MemInfo {
             total_memory: state.0,
             free_memory: state.1,
+            process_stats: proc_stats,
         }
     }
 }
@@ -47,6 +52,7 @@ fn main() -> io::Result<()> {
 pub struct App {
     totalram: u64,
     freeram: u64,
+    proc_info: Vec<ProcStatus>,
     exit: bool,
 }
 
@@ -55,13 +61,14 @@ impl App {
         let mut info_receiver = InfoReceiver::new();
 
         while !self.exit {
-            // terminal.draw(|frame| self.draw(frame))?;
+            terminal.draw(|frame| self.draw(frame))?;
 
             self.handle_events();
 
             while let Ok(result) = info_receiver.reciver.try_recv() {
                 self.freeram = result.free_memory;
                 self.totalram = result.total_memory;
+                self.proc_info = result.process_stats;
             }
         }
         Ok(())
@@ -128,6 +135,19 @@ impl Widget for &App {
             .centered()
             .block(block)
             .render(area, buf);
+
+        let mut list_items = Vec::<ListItem>::new();
+
+        for proc_info in &self.proc_info {
+            list_items.push(ListItem::new(Line::from(Span::styled(
+                format!(
+                    "{} ; PID: {} ;VM {} KB; RSS: {} KB",
+                    proc_info.name, proc_info.pid, proc_info.vm_size, proc_info.vm_size
+                ),
+                Style::default().fg(Color::Yellow),
+            ))));
+        }
+        List::new(list_items).render(area, buf);
     }
 }
 
@@ -144,54 +164,89 @@ impl InfoReceiver {
                     loop {
                         interval.tick().await;
 
+                        let mut mem_info: MemInfo = MemInfo::default();
+
                         unsafe {
                             let mut info: libc::sysinfo = mem::zeroed();
 
                             if libc::sysinfo(&mut info) == 0 {
-                                let mem_info: MemInfo = MemInfo {
-                                    total_memory: (info.totalram),
-                                    free_memory: (info.freeram),
-                                };
-                                send.send(mem_info).await.unwrap();
+                                mem_info.free_memory = info.freeram;
+                                mem_info.total_memory = info.totalram;
                             } else {
                                 eprintln!("Failed to get system info.");
                             }
+                        }
 
-                            let paths = fs::read_dir("/proc").unwrap();
+                        let paths = fs::read_dir("/proc").unwrap();
 
-                            for path in paths {
-                                let pid_result: Result<i32, _> = path
-                                    .unwrap()
-                                    .path()
-                                    .file_name()
-                                    .unwrap()
-                                    .to_str()
-                                    .unwrap()
-                                    .parse();
+                        let mut proc_stats = Vec::new();
 
-                                if let Ok(pid) = pid_result {
-                                    let status_path =
-                                        "/proc/".to_string() + pid.to_string().as_str() + "/status";
+                        for path in paths {
+                            let pid_result: Result<i32, _> = path
+                                .unwrap()
+                                .path()
+                                .file_name()
+                                .unwrap()
+                                .to_str()
+                                .unwrap()
+                                .parse();
 
-                                    let mut contents = Vec::new();
+                            if let Ok(pid) = pid_result {
+                                let status_path =
+                                    "/proc/".to_string() + pid.to_string().as_str() + "/status";
 
-                                    if let Ok(file) =
-                                        tokio::fs::File::open(status_path).await.as_mut()
-                                    {
-                                        let _ = file.read_to_end(&mut contents).await;
+                                let mut contents = Vec::new();
 
-                                        let mut statm_result = Status::default();
-                                        let output = String::from_utf8(contents).unwrap();
+                                if let Ok(file) = tokio::fs::File::open(status_path).await.as_mut()
+                                {
+                                    let _ = file.read_to_end(&mut contents).await;
 
-                                        let mut splitted = output.lines();
-                                        statm_result.name = splitted.nth(0).unwrap().to_string();
-                                        statm_result.vm_rss = splitted.nth(21).unwrap().to_string();
+                                    let output = String::from_utf8(contents).unwrap();
 
-                                        println!("PID: {:?}, status: {:?}", pid, statm_result)
+                                    let mut statm_result = ProcStatus::default();
+
+                                    for line in output.lines() {
+                                        if line.starts_with("Name:") {
+                                            if let Some(result) = line.split(":").nth(1) {
+                                                statm_result.name = String::from(result);
+                                            }
+                                        } else if line.starts_with("Pid:") {
+                                            let pid: u64 = line
+                                                .chars()
+                                                .filter(|c| c.is_ascii_digit())
+                                                .collect::<String>()
+                                                .parse()
+                                                .unwrap_or(0);
+                                            statm_result.pid = pid;
+                                        } else if line.starts_with("VmSize:") {
+                                            let number: u64 = line
+                                                .chars()
+                                                .filter(|c| c.is_ascii_digit())
+                                                .collect::<String>()
+                                                .parse()
+                                                .unwrap_or(0);
+                                            statm_result.vm_size = number;
+                                        } else if line.starts_with("VmRSS:") {
+                                            let number: u64 = line
+                                                .chars()
+                                                .filter(|c| c.is_ascii_digit())
+                                                .collect::<String>()
+                                                .parse()
+                                                .unwrap_or(0);
+                                            statm_result.vm_rss = number;
+                                        }
+                                    }
+
+                                    if !statm_result.name.is_empty() {
+                                        proc_stats.push(statm_result);
                                     }
                                 }
                             }
                         }
+                        mem_info.process_stats = proc_stats;
+                        mem_info.process_stats.sort_by_key(|u| u.vm_size);
+                        mem_info.process_stats.reverse();
+                        send.send(mem_info).await.unwrap();
                     }
                 });
                 task.await.unwrap();
@@ -203,8 +258,9 @@ impl InfoReceiver {
 }
 
 #[derive(Debug, Default)]
-pub struct Status {
-    pub name: String, // (0)
-    // pub vm_size: String,
-    pub vm_rss: String,
+pub struct ProcStatus {
+    pub name: String,
+    pub pid: u64,
+    pub vm_size: u64,
+    pub vm_rss: u64,
 }
