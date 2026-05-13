@@ -1,12 +1,7 @@
 use libc;
 
-use std::fs;
-use std::io;
-use std::mem;
-use std::num;
-use std::ops::Add;
-
 use crossterm::event::{self, KeyCode};
+use ratatui::layout::{Constraint, Direction, Layout, Rows};
 use ratatui::style::Color;
 use ratatui::{
     DefaultTerminal, Frame,
@@ -15,8 +10,13 @@ use ratatui::{
     style::{Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, List, ListItem, Paragraph, Widget},
+    widgets::{Block, List, ListItem, Paragraph, Row, Table, TableState, Widget},
 };
+use std::fs;
+use std::io;
+use std::mem;
+use std::num;
+use std::ops::Add;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::runtime::Builder;
@@ -60,10 +60,14 @@ impl App {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let mut info_receiver = InfoReceiver::new();
 
-        while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
+        let mut table_state = TableState::default();
+        table_state.select_first();
+        table_state.select_first_column();
 
-            self.handle_events();
+        while !self.exit {
+            terminal.draw(|frame| self.draw(frame, &mut table_state))?;
+
+            self.handle_events(&mut table_state);
 
             while let Ok(result) = info_receiver.reciver.try_recv() {
                 self.freeram = result.free_memory;
@@ -74,17 +78,80 @@ impl App {
         Ok(())
     }
 
-    fn draw(&self, frame: &mut Frame) {
-        frame.render_widget(self, frame.area());
+    fn draw(&self, frame: &mut Frame, table_state: &mut TableState) {
+        let title = Line::from(" Process Watcher ".bold());
+        let instructions = Line::from(vec![
+            " Update ".into(),
+            "<u>".blue().bold(),
+            " Quit ".into(),
+            "<Q> ".blue().bold(),
+        ]);
+        let block = Block::bordered()
+            .title(title.centered())
+            .title_bottom(instructions.centered())
+            .border_set(border::THICK);
+
+        let counter_text = Text::from(vec![Line::from(vec![
+            "Totalram: ".into(),
+            self.totalram.to_string().yellow(),
+            " Freeram: ".into(),
+            self.freeram.to_string().green(),
+        ])]);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .spacing(1)
+            .split(frame.area());
+
+        let paragraph = Paragraph::new(counter_text).centered().block(block);
+
+        frame.render_widget(paragraph, chunks[0]);
+
+        let header = Row::new(["name", "PID", "VM Mem", "RSS"])
+            .style(Style::new().bold())
+            .bottom_margin(1);
+
+        let mut rows: Vec<Row> = Vec::new();
+
+        for proc_info in &self.proc_info {
+            rows.push(Row::new([
+                proc_info.name.clone(),
+                proc_info.pid.to_string(),
+                proc_info.vm_size.to_string(),
+                proc_info.vm_rss.to_string(),
+            ]));
+        }
+
+        let widths = [
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ];
+        let table = Table::new(rows, widths)
+            .header(header)
+            .column_spacing(1)
+            .style(Color::White)
+            .row_highlight_style(Style::new().on_black().bold())
+            .column_highlight_style(Color::Gray)
+            .cell_highlight_style(Style::new().reversed().yellow())
+            .highlight_symbol("() ");
+
+        frame.render_stateful_widget(table, chunks[1], table_state);
     }
 
-    fn handle_events(&mut self) {
+    fn handle_events(&mut self, table_state: &mut TableState) {
         match event::poll(Duration::from_millis(100)) {
             Ok(true) => {
                 if let Ok(event::Event::Key(key)) = event::read() {
                     match key.code {
                         KeyCode::Char('q') => self.exit(),
                         KeyCode::Char('u') => self.update(),
+                        KeyCode::Down => table_state.select_next(),
+                        KeyCode::Up => table_state.select_previous(),
+                        KeyCode::Right => table_state.select_next_column(),
+                        KeyCode::Left => table_state.select_previous_column(),
                         _ => {}
                     }
                 }
@@ -110,47 +177,6 @@ impl App {
     }
 }
 
-impl Widget for &App {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = Line::from(" Process Watcher ".bold());
-        let instructions = Line::from(vec![
-            " Update ".into(),
-            "<u>".blue().bold(),
-            " Quit ".into(),
-            "<Q> ".blue().bold(),
-        ]);
-        let block = Block::bordered()
-            .title(title.centered())
-            .title_bottom(instructions.centered())
-            .border_set(border::THICK);
-
-        let counter_text = Text::from(vec![Line::from(vec![
-            "Totalram: ".into(),
-            self.totalram.to_string().yellow(),
-            " Freeram: ".into(),
-            self.freeram.to_string().green(),
-        ])]);
-
-        Paragraph::new(counter_text)
-            .centered()
-            .block(block)
-            .render(area, buf);
-
-        let mut list_items = Vec::<ListItem>::new();
-
-        for proc_info in &self.proc_info {
-            list_items.push(ListItem::new(Line::from(Span::styled(
-                format!(
-                    "{} ; PID: {} ;VM {} KB; RSS: {} KB",
-                    proc_info.name, proc_info.pid, proc_info.vm_size, proc_info.vm_size
-                ),
-                Style::default().fg(Color::Yellow),
-            ))));
-        }
-        List::new(list_items).render(area, buf);
-    }
-}
-
 impl InfoReceiver {
     pub fn new() -> InfoReceiver {
         let (send, recv) = mpsc::channel(10);
@@ -160,7 +186,7 @@ impl InfoReceiver {
         std::thread::spawn(move || {
             rt.block_on(async move {
                 let task = tokio::spawn(async move {
-                    let mut interval = time::interval(Duration::from_secs(10));
+                    let mut interval = time::interval(Duration::from_secs(2));
                     loop {
                         interval.tick().await;
 
@@ -237,7 +263,7 @@ impl InfoReceiver {
                                         }
                                     }
 
-                                    if !statm_result.name.is_empty() {
+                                    if !statm_result.name.is_empty() && statm_result.vm_size > 0 {
                                         proc_stats.push(statm_result);
                                     }
                                 }
