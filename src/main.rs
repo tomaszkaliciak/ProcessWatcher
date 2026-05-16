@@ -11,6 +11,7 @@ use ratatui::{
     widgets::{Block, List, ListItem, Paragraph, Row, Table, TableState, Widget},
 };
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::mem;
@@ -104,7 +105,7 @@ impl App {
 
         frame.render_widget(paragraph, chunks[0]);
 
-        let header = Row::new(["name", "PID", "VIRT", "RSS", "SHR", "MEM(%)"])
+        let header = Row::new(["name", "PID", "VIRT", "RSS", "SHR", "MEM(%)", "CPU(%)"])
             .style(Style::new().bold())
             .bottom_margin(1);
 
@@ -118,11 +119,13 @@ impl App {
                 proc_info.vm_rss.to_string(),
                 proc_info.rss_shem.to_string(),
                 proc_info.rss_proc.to_string(),
+                proc_info.cpu_usage.to_string(),
             ]));
         }
 
         let widths = [
-            Constraint::Percentage(25),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
             Constraint::Percentage(10),
             Constraint::Percentage(10),
             Constraint::Percentage(10),
@@ -177,6 +180,11 @@ impl App {
     }
 }
 
+struct ProcessCpuTime {
+    user_time: u64,
+    system_time: u64,
+}
+
 impl InfoReceiver {
     pub fn new() -> InfoReceiver {
         let (send, recv) = mpsc::channel(10);
@@ -184,102 +192,192 @@ impl InfoReceiver {
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
 
         _ = std::thread::Builder::new()
-            .name("system-info-worker".to_string())
+            .name("sysinfo-worker".to_string())
             .spawn(move || {
                 rt.block_on(async move {
-                    let task = tokio::spawn(async move {
-                        let mut interval = time::interval(Duration::from_secs(2));
-                        loop {
-                            interval.tick().await;
+                        let task = tokio::spawn(async move {
+                            let mut cpu_proc_stat_cache: HashMap<i32, ProcessCpuTime> =
+                                HashMap::new();
 
-                            let mut mem_info: MemInfo = MemInfo::default();
+                            let mut last_sample_time = time::Instant::now();
 
-                            unsafe {
-                                let mut info: libc::sysinfo = mem::zeroed();
+                            let mut interval = time::interval(Duration::from_secs(2));
+                            loop {
+                                interval.tick().await;
 
-                                if libc::sysinfo(&mut info) == 0 {
-                                    mem_info.free_memory = info.freeram;
-                                    mem_info.total_memory = info.totalram;
-                                } else {
-                                    eprintln!("Failed to get system info.");
+                                let mut mem_info: MemInfo = MemInfo::default();
+
+                                unsafe {
+                                    let mut info: libc::sysinfo = mem::zeroed();
+
+                                    if libc::sysinfo(&mut info) == 0 {
+                                        mem_info.free_memory = info.freeram;
+                                        mem_info.total_memory = info.totalram;
+                                    } else {
+                                        eprintln!("Failed to get system info.");
+                                    }
                                 }
-                            }
 
-                            let paths = fs::read_dir("/proc").unwrap();
+                                let paths = fs::read_dir("/proc").unwrap();
 
-                            let mut proc_stats = Vec::new();
+                                let mut proc_stats = Vec::new();
 
-                            for path in paths {
-                                let pid_result: Result<i32, _> = path
-                                    .unwrap()
-                                    .path()
-                                    .file_name()
-                                    .unwrap()
-                                    .to_str()
-                                    .unwrap()
-                                    .parse();
+                                for path in paths {
+                                    let pid_result: Result<i32, _> = path
+                                        .unwrap()
+                                        .path()
+                                        .file_name()
+                                        .unwrap()
+                                        .to_str()
+                                        .unwrap()
+                                        .parse();
 
-                                if let Ok(pid) = pid_result {
-                                    let status_path =
-                                        "/proc/".to_string() + pid.to_string().as_str() + "/status";
+                                    if let Ok(pid) = pid_result {
+                                        let status_path = "/proc/".to_string()
+                                            + pid.to_string().as_str()
+                                            + "/status";
 
-                                    let mut contents = Vec::new();
-
-                                    if let Ok(file) =
-                                        tokio::fs::File::open(status_path).await.as_mut()
-                                    {
-                                        let _ = file.read_to_end(&mut contents).await;
-
-                                        let output = String::from_utf8(contents).unwrap();
+                                        let mut contents = Vec::new();
 
                                         let mut statm_result = ProcStatus::default();
 
-                                        for line in output.lines() {
-                                            if let Some(matching) = line.strip_prefix("Name:") {
-                                                statm_result.name =
-                                                    matching.trim_start().to_string();
-                                            } else if let Some(matching) = line.strip_prefix("Pid:")
-                                            {
-                                                if let Ok(parsed_pid) =
-                                                    matching.trim_start().parse()
+                                        if let Ok(file) =
+                                            tokio::fs::File::open(status_path).await.as_mut()
+                                        {
+                                            let _ = file.read_to_end(&mut contents).await;
+
+                                            let output = String::from_utf8(contents).unwrap();
+
+                                            for line in output.lines() {
+                                                if let Some(matching) = line.strip_prefix("Name:") {
+                                                    statm_result.name =
+                                                        matching.trim_start().to_string();
+                                                } else if let Some(matching) =
+                                                    line.strip_prefix("Pid:")
                                                 {
-                                                    statm_result.pid = parsed_pid;
+                                                    if let Ok(parsed_pid) =
+                                                        matching.trim_start().parse()
+                                                    {
+                                                        statm_result.pid = parsed_pid;
+                                                    }
+                                                } else if let Some(matching) =
+                                                    line.strip_prefix("VmSize:")
+                                                {
+                                                    if let Some(digit_part) = matching
+                                                        .trim_start()
+                                                        .split_whitespace()
+                                                        .next()
+                                                    {
+                                                        if let Ok(parsed) =
+                                                            digit_part.parse::<u64>()
+                                                        {
+                                                            statm_result.vm_size = parsed;
+                                                        }
+                                                    }
+                                                } else if let Some(matching) =
+                                                    line.strip_prefix("VmRSS:")
+                                                {
+                                                    if let Some(digit_part) = matching
+                                                        .trim_start()
+                                                        .split_whitespace()
+                                                        .next()
+                                                    {
+                                                        if let Ok(parsed) =
+                                                            digit_part.parse::<u64>()
+                                                        {
+                                                            statm_result.vm_rss = parsed;
+                                                            statm_result.rss_proc = (parsed * 1024)
+                                                                as f32
+                                                                / (mem_info.total_memory as f32)
+                                                                * 100.0;
+                                                        }
+                                                    }
+                                                } else if let Some(matching) =
+                                                    line.strip_prefix("RssShmem:")
+                                                {
+                                                    if let Some(digit_part) = matching
+                                                        .trim_start()
+                                                        .split_whitespace()
+                                                        .next()
+                                                    {
+                                                        if let Ok(parsed) =
+                                                            digit_part.parse::<u64>()
+                                                        {
+                                                            statm_result.rss_shem = parsed;
+                                                        }
+                                                    }
+                                                    break;
                                                 }
-                                            } else if let Some(matching) =
-                                                line.strip_prefix("VmSize:")
+                                            }
+                                        }
+
+                                        let mut contents_2 = Vec::new();
+
+                                        let stat_path = "/proc/".to_string()
+                                            + pid.to_string().as_str()
+                                            + "/stat";
+
+                                        if let Ok(file) =
+                                            tokio::fs::File::open(stat_path).await.as_mut()
+                                        {
+                                            let _ = file.read_to_end(&mut contents_2).await;
+
+                                            let output = String::from_utf8(contents_2).unwrap();
+
+                                            let splits: Vec<&str> =
+                                                output.split_whitespace().collect();
+
+                                            if let (Some(user_time), Some(system_time)) =
+                                                { (splits.get(13), splits.get(14)) }
                                             {
-                                                if let Some(digit_part) =
-                                                    matching.trim_start().split_whitespace().next()
-                                                {
-                                                    if let Ok(parsed) = digit_part.parse::<u64>() {
-                                                        statm_result.vm_size = parsed;
+                                                if let (
+                                                    Ok(parsed_user_time),
+                                                    Ok(parsed_system_time),
+                                                ) = {
+                                                    (
+                                                        user_time.parse::<u64>(),
+                                                        system_time.parse::<u64>(),
+                                                    )
+                                                } {
+                                                    if let Some(entry) =
+                                                        cpu_proc_stat_cache.get(&pid)
+                                                    {
+                                                        let nb_processors = 8;
+
+                                                        let delta_user = parsed_user_time
+                                                            .saturating_sub(entry.user_time);
+                                                        let delta_system = parsed_system_time
+                                                            .saturating_sub(entry.system_time);
+
+                                                        let ticks =
+                                                            (delta_user + delta_system) as f32;
+
+                                                        let elapsed_seconds = last_sample_time
+                                                            .elapsed()
+                                                            .as_secs_f32();
+
+                                                        let cpu_usage = (ticks
+                                                            * nb_processors as f32)
+                                                            / (100.0 * elapsed_seconds);
+
+                                                        statm_result.cpu_usage = cpu_usage;
+                                                        let _ = cpu_proc_stat_cache.insert(
+                                                            pid,
+                                                            ProcessCpuTime {
+                                                                user_time: parsed_user_time,
+                                                                system_time: parsed_system_time,
+                                                            },
+                                                        );
+                                                    } else {
+                                                        cpu_proc_stat_cache.insert(
+                                                            pid,
+                                                            ProcessCpuTime {
+                                                                user_time: parsed_user_time,
+                                                                system_time: parsed_system_time,
+                                                            },
+                                                        );
                                                     }
                                                 }
-                                            } else if let Some(matching) =
-                                                line.strip_prefix("VmRSS:")
-                                            {
-                                                if let Some(digit_part) =
-                                                    matching.trim_start().split_whitespace().next()
-                                                {
-                                                    if let Ok(parsed) = digit_part.parse::<u64>() {
-                                                        statm_result.vm_rss = parsed;
-                                                        statm_result.rss_proc = (parsed * 1024)
-                                                            as f32
-                                                            / (mem_info.total_memory as f32)
-                                                            * 100.0;
-                                                    }
-                                                }
-                                            } else if let Some(matching) =
-                                                line.strip_prefix("RssShmem:")
-                                            {
-                                                if let Some(digit_part) =
-                                                    matching.trim_start().split_whitespace().next()
-                                                {
-                                                    if let Ok(parsed) = digit_part.parse::<u64>() {
-                                                        statm_result.rss_shem = parsed;
-                                                    }
-                                                }
-                                                break;
                                             }
                                         }
 
@@ -289,14 +387,14 @@ impl InfoReceiver {
                                         }
                                     }
                                 }
+                                mem_info.process_stats = proc_stats;
+                                mem_info.process_stats.sort_by_key(|u| Reverse(u.vm_rss));
+                                send.send(mem_info).await.unwrap();
+                                last_sample_time = time::Instant::now();
                             }
-                            mem_info.process_stats = proc_stats;
-                            mem_info.process_stats.sort_by_key(|u| Reverse(u.vm_rss));
-                            send.send(mem_info).await.unwrap();
-                        }
+                        });
+                        task.await.unwrap();
                     });
-                    task.await.unwrap();
-                });
             });
 
         InfoReceiver { reciver: recv }
@@ -311,4 +409,5 @@ pub struct ProcStatus {
     pub vm_rss: u64,
     pub rss_shem: u64,
     pub rss_proc: f32,
+    pub cpu_usage: f32,
 }
