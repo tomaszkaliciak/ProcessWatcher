@@ -104,7 +104,7 @@ impl App {
 
         frame.render_widget(paragraph, chunks[0]);
 
-        let header = Row::new(["name", "PID", "VIRT", "RSS", "SHR"])
+        let header = Row::new(["name", "PID", "VIRT", "RSS", "SHR", "MEM(%)"])
             .style(Style::new().bold())
             .bottom_margin(1);
 
@@ -117,11 +117,13 @@ impl App {
                 proc_info.vm_size.to_string(),
                 proc_info.vm_rss.to_string(),
                 proc_info.rss_shem.to_string(),
+                proc_info.rss_proc.to_string(),
             ]));
         }
 
         let widths = [
             Constraint::Percentage(25),
+            Constraint::Percentage(10),
             Constraint::Percentage(10),
             Constraint::Percentage(10),
             Constraint::Percentage(10),
@@ -261,6 +263,10 @@ impl InfoReceiver {
                                                 {
                                                     if let Ok(parsed) = digit_part.parse::<u64>() {
                                                         statm_result.vm_rss = parsed;
+                                                        statm_result.rss_proc = (parsed * 1024)
+                                                            as f32
+                                                            / (mem_info.total_memory as f32)
+                                                            * 100.0;
                                                     }
                                                 }
                                             } else if let Some(matching) =
@@ -285,7 +291,7 @@ impl InfoReceiver {
                                 }
                             }
                             mem_info.process_stats = proc_stats;
-                            mem_info.process_stats.sort_by_key(|u| Reverse(u.vm_size));
+                            mem_info.process_stats.sort_by_key(|u| Reverse(u.vm_rss));
                             send.send(mem_info).await.unwrap();
                         }
                     });
@@ -304,4 +310,5 @@ pub struct ProcStatus {
     pub vm_size: u64,
     pub vm_rss: u64,
     pub rss_shem: u64,
+    pub rss_proc: f32,
 }
