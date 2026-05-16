@@ -10,6 +10,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, List, ListItem, Paragraph, Row, Table, TableState, Widget},
 };
+use std::cmp::Reverse;
 use std::fs;
 use std::io;
 use std::mem;
@@ -103,7 +104,7 @@ impl App {
 
         frame.render_widget(paragraph, chunks[0]);
 
-        let header = Row::new(["name", "PID", "VM Mem", "RSS", "SHM"])
+        let header = Row::new(["name", "PID", "VIRT", "RSS", "SHR"])
             .style(Style::new().bold())
             .bottom_margin(1);
 
@@ -284,8 +285,7 @@ impl InfoReceiver {
                                 }
                             }
                             mem_info.process_stats = proc_stats;
-                            // mem_info.process_stats.sort_by_key(|u| u.vm_size);
-                            // mem_info.process_stats.reverse();
+                            mem_info.process_stats.sort_by_key(|u| Reverse(u.vm_size));
                             send.send(mem_info).await.unwrap();
                         }
                     });
