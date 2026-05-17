@@ -3,12 +3,13 @@ use libc;
 use crossterm::event::{self, KeyCode};
 use ratatui::layout::{Constraint, Direction, Layout, Rows};
 use ratatui::style::Color;
+use ratatui::symbols;
 use ratatui::{
     DefaultTerminal, Frame,
-    style::{Style, Stylize},
+    style::{Modifier, Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, List, ListItem, Paragraph, Row, Table, TableState, Widget},
+    widgets::{Block, Gauge, LineGauge, List, ListItem, Paragraph, Row, Table, TableState, Widget},
 };
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -24,14 +25,16 @@ use tokio::time::{self, Duration};
 pub struct MemInfo {
     total_memory: u64,
     free_memory: u64,
+    cpu_usage: f32,
     process_stats: Vec<ProcStatus>,
 }
 
 impl MemInfo {
-    pub fn send(state: (u64, u64), proc_stats: Vec<ProcStatus>) -> MemInfo {
+    pub fn send(state: (u64, u64), cpu_usage: f32, proc_stats: Vec<ProcStatus>) -> MemInfo {
         MemInfo {
             total_memory: state.0,
             free_memory: state.1,
+            cpu_usage: cpu_usage,
             process_stats: proc_stats,
         }
     }
@@ -49,6 +52,7 @@ fn main() -> io::Result<()> {
 pub struct App {
     totalram: u64,
     freeram: u64,
+    cpu_usage: f32,
     proc_info: Vec<ProcStatus>,
     exit: bool,
 }
@@ -70,6 +74,7 @@ impl App {
                 self.freeram = result.free_memory;
                 self.totalram = result.total_memory;
                 self.proc_info = result.process_stats;
+                self.cpu_usage = result.cpu_usage;
             }
         }
         Ok(())
@@ -93,11 +98,17 @@ impl App {
             self.totalram.to_string().yellow(),
             " Free memory (KB): ".into(),
             self.freeram.to_string().green(),
+            " CPU USAGE: ".into(),
+            self.cpu_usage.to_string().green(),
         ])]);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(3),
+            ])
             .spacing(1)
             .split(frame.area());
 
@@ -122,6 +133,23 @@ impl App {
                 proc_info.cpu_usage.to_string(),
             ]));
         }
+
+        // let gauge = Gauge::default()
+        //     .gauge_style(Style::new().green().on_black())
+        //     .label("CPU usage")
+        //     .percent(self.cpu_usage as u16);
+        //
+        //
+        //
+        //
+        let cpu_usage_procent = self.cpu_usage / 100.0;
+
+        let line_gauge = LineGauge::default()
+            .filled_style(Style::new().white().on_red().bold())
+            .unfilled_style(Style::new().gray().on_black())
+            .label(cpu_usage_procent.to_string())
+            .ratio((self.cpu_usage / 100.0) as f64);
+        frame.render_widget(line_gauge, chunks[2]);
 
         let widths = [
             Constraint::Percentage(10),
@@ -200,6 +228,8 @@ impl InfoReceiver {
                                 HashMap::new();
 
                             let mut last_sample_time = time::Instant::now();
+                            let mut old_cpu_work_time = 0;
+                            let mut old_cpu_total_time = 0;
 
                             let mut interval = time::interval(Duration::from_secs(2));
                             loop {
@@ -387,6 +417,82 @@ impl InfoReceiver {
                                         }
                                     }
                                 }
+
+                                if let Ok(file) = tokio::fs::File::open("/proc/stat").await.as_mut()
+                                {
+                                    let mut contents = Vec::new();
+                                    let _ = file.read_to_end(&mut contents).await;
+
+                                    let output = String::from_utf8(contents).unwrap();
+
+                                    let splits: Vec<&str> = output.split_whitespace().collect();
+
+                                    if let (
+                                        Some(r_user),
+                                        Some(r_nice),
+                                        Some(r_system),
+                                        Some(r_idle),
+                                        Some(r_iowait),
+                                        Some(r_irq),
+                                        Some(r_softirq),
+                                        Some(r_steal),
+                                    ) = {
+                                        (
+                                            splits.get(1),
+                                            splits.get(2),
+                                            splits.get(3),
+                                            splits.get(4),
+                                            splits.get(5),
+                                            splits.get(6),
+                                            splits.get(7),
+                                            splits.get(8),
+                                        )
+                                    } {
+                                        if let (
+                                            Ok(user),
+                                            Ok(nice),
+                                            Ok(system),
+                                            Ok(idle),
+                                            Ok(iowait),
+                                            Ok(irq),
+                                            Ok(softirq),
+                                            Ok(steal),
+                                        ) = {
+                                            (
+                                                r_user.parse::<u64>(),
+                                                r_nice.parse::<u64>(),
+                                                r_system.parse::<u64>(),
+                                                r_idle.parse::<u64>(),
+                                                r_iowait.parse::<u64>(),
+                                                r_irq.parse::<u64>(),
+                                                r_softirq.parse::<u64>(),
+                                                r_steal.parse::<u64>(),
+                                            )
+                                        } {
+                                            let total_idle = idle + iowait;
+                                            let total = user
+                                                + nice
+                                                + system
+                                                + total_idle
+                                                + irq
+                                                + softirq
+                                                + steal;
+                                            let work_time = total - total_idle;
+
+                                            if old_cpu_total_time != 0 && old_cpu_work_time != 0 {
+                                                let cpu_usage = ((work_time - old_cpu_work_time)
+                                                    as f32
+                                                    / (total - old_cpu_total_time) as f32)
+                                                    * 100.0;
+                                                mem_info.cpu_usage = cpu_usage;
+                                            }
+
+                                            old_cpu_total_time = total;
+                                            old_cpu_work_time = work_time;
+                                        }
+                                    }
+                                }
+
                                 mem_info.process_stats = proc_stats;
                                 mem_info.process_stats.sort_by_key(|u| Reverse(u.vm_rss));
                                 send.send(mem_info).await.unwrap();
