@@ -1,7 +1,7 @@
 use libc;
 
 use crossterm::event::{self, KeyCode};
-use ratatui::layout::{Constraint, Direction, Layout, Rows};
+use ratatui::layout::{Constraint, Direction, Layout, Rect, Rows};
 use ratatui::style::Color;
 use ratatui::symbols;
 use ratatui::{
@@ -132,30 +132,47 @@ impl App {
                 proc_info.vm_rss.to_string(),
                 proc_info.rss_shem.to_string(),
                 proc_info.rss_proc.to_string(),
-                proc_info.cpu_usage.to_string(),
+                format!("{:>2.4}", proc_info.cpu_usage.to_string()),
             ]));
         }
 
-        let constraints_cpu_usage: Vec<Constraint> = self
+        let items: Vec<ListItem> = self
             .cpu_usage
-            .iter()
-            .map(|_| Constraint::Length(1))
+            .keys()
+            .map(|key| {
+                ListItem::new(Line::from(vec![
+                    Span::raw(symbols::DOT),
+                    Span::styled(
+                        format!("{:>3}", key),
+                        Style::default()
+                            .fg(Color::LightGreen)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]))
+            })
             .collect();
 
-        let chunks_cpu = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(constraints_cpu_usage)
-            .split(chunks[2]);
+        let list = List::new(items);
+        frame.render_widget(list, chunks[2]);
 
-        for (i, entry) in self.cpu_usage.iter().enumerate() {
-            let cpu_usage_procent = entry.1 / 100.0;
-            let line_gauge = LineGauge::default()
-                .filled_style(Style::new().white().on_red().bold())
-                .unfilled_style(Style::new().gray().on_black())
-                .label(String::from(entry.0) + " " + cpu_usage_procent.to_string().as_str())
-                .ratio((entry.1 / 100.0) as f64);
+        for (i, (_, cpu_usage)) in self.cpu_usage.iter().enumerate() {
+            let gauge = Gauge::default()
+                .gauge_style(Style::default().fg(Color::Yellow))
+                .ratio((cpu_usage / 100.0) as f64);
 
-            frame.render_widget(line_gauge, chunks_cpu[i]);
+            if chunks[2].top().saturating_add(i as u16) > 65 {
+                continue;
+            }
+
+            frame.render_widget(
+                gauge,
+                Rect {
+                    x: chunks[2].left() + 7,
+                    y: chunks[2].top().saturating_add(i as u16),
+                    width: chunks[2].width - 1,
+                    height: 1,
+                },
+            );
         }
 
         let widths = [
