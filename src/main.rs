@@ -235,307 +235,65 @@ impl InfoReceiver {
             .name("sysinfo-worker".to_string())
             .spawn(move || {
                 rt.block_on(async move {
-                        let task = tokio::spawn(async move {
-                            let mut cpu_proc_stat_cache: HashMap<i32, ProcessCpuTime> =
-                                HashMap::new();
+                    let task = tokio::spawn(async move {
+                        let mut last_sample_time = time::Instant::now();
 
-                            let mut last_sample_time = time::Instant::now();
+                        let mut cpu_usage_state: HashMap<String, CpuUsageState> = HashMap::new();
 
-                            let mut cpu_usage_state: HashMap<String, CpuUsageState> =
-                                HashMap::new();
+                        let mut cpu_proc_stat_cache: HashMap<i32, ProcessCpuTime> = HashMap::new();
 
-                            let mut interval = time::interval(Duration::from_secs(2));
-                            loop {
-                                interval.tick().await;
+                        let mut interval = time::interval(Duration::from_secs(2));
+                        loop {
+                            interval.tick().await;
 
-                                let mut mem_info: MemInfo = MemInfo::default();
+                            let mut mem_info: MemInfo = MemInfo::default();
 
-                                unsafe {
-                                    let mut info: libc::sysinfo = mem::zeroed();
+                            (mem_info.free_memory, mem_info.total_memory) =
+                                get_free_and_total_memory();
 
-                                    if libc::sysinfo(&mut info) == 0 {
-                                        mem_info.free_memory = info.freeram;
-                                        mem_info.total_memory = info.totalram;
-                                    } else {
-                                        eprintln!("Failed to get system info.");
+                            let paths = fs::read_dir("/proc").unwrap();
+
+                            let mut proc_stats = Vec::new();
+
+                            let elapsed_seconds = last_sample_time.elapsed().as_secs_f32();
+
+                            for path in paths {
+                                let pid_result: Result<i32, _> = path
+                                    .unwrap()
+                                    .path()
+                                    .file_name()
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap()
+                                    .parse();
+
+                                if let Ok(pid) = pid_result {
+                                    let mut statm_result =
+                                        get_proc_pid_status(pid, mem_info.total_memory).await;
+
+                                    statm_result.cpu_usage = get_proc_pid_stat_cpu_usage(
+                                        pid,
+                                        elapsed_seconds,
+                                        &mut cpu_proc_stat_cache,
+                                    )
+                                    .await;
+
+                                    if !statm_result.name.is_empty() && statm_result.vm_size > 0 {
+                                        proc_stats.push(statm_result);
                                     }
                                 }
-
-                                let paths = fs::read_dir("/proc").unwrap();
-
-                                let mut proc_stats = Vec::new();
-
-                                for path in paths {
-                                    let pid_result: Result<i32, _> = path
-                                        .unwrap()
-                                        .path()
-                                        .file_name()
-                                        .unwrap()
-                                        .to_str()
-                                        .unwrap()
-                                        .parse();
-
-                                    if let Ok(pid) = pid_result {
-                                        let status_path = "/proc/".to_string()
-                                            + pid.to_string().as_str()
-                                            + "/status";
-
-                                        let mut contents = Vec::new();
-
-                                        let mut statm_result = ProcStatus::default();
-
-                                        if let Ok(file) =
-                                            tokio::fs::File::open(status_path).await.as_mut()
-                                        {
-                                            let _ = file.read_to_end(&mut contents).await;
-
-                                            let output = String::from_utf8(contents).unwrap();
-
-                                            for line in output.lines() {
-                                                if let Some(matching) = line.strip_prefix("Name:") {
-                                                    statm_result.name =
-                                                        matching.trim_start().to_string();
-                                                } else if let Some(matching) =
-                                                    line.strip_prefix("Pid:")
-                                                {
-                                                    if let Ok(parsed_pid) =
-                                                        matching.trim_start().parse()
-                                                    {
-                                                        statm_result.pid = parsed_pid;
-                                                    }
-                                                } else if let Some(matching) =
-                                                    line.strip_prefix("VmSize:")
-                                                {
-                                                    if let Some(digit_part) = matching
-                                                        .trim_start()
-                                                        .split_whitespace()
-                                                        .next()
-                                                    {
-                                                        if let Ok(parsed) =
-                                                            digit_part.parse::<u64>()
-                                                        {
-                                                            statm_result.vm_size = parsed;
-                                                        }
-                                                    }
-                                                } else if let Some(matching) =
-                                                    line.strip_prefix("VmRSS:")
-                                                {
-                                                    if let Some(digit_part) = matching
-                                                        .trim_start()
-                                                        .split_whitespace()
-                                                        .next()
-                                                    {
-                                                        if let Ok(parsed) =
-                                                            digit_part.parse::<u64>()
-                                                        {
-                                                            statm_result.vm_rss = parsed;
-                                                            statm_result.rss_proc = (parsed * 1024)
-                                                                as f32
-                                                                / (mem_info.total_memory as f32)
-                                                                * 100.0;
-                                                        }
-                                                    }
-                                                } else if let Some(matching) =
-                                                    line.strip_prefix("RssShmem:")
-                                                {
-                                                    if let Some(digit_part) = matching
-                                                        .trim_start()
-                                                        .split_whitespace()
-                                                        .next()
-                                                    {
-                                                        if let Ok(parsed) =
-                                                            digit_part.parse::<u64>()
-                                                        {
-                                                            statm_result.rss_shem = parsed;
-                                                        }
-                                                    }
-                                                    break;
-                                                }
-                                            }
-                                        }
-
-                                        let mut contents_2 = Vec::new();
-
-                                        let stat_path = "/proc/".to_string()
-                                            + pid.to_string().as_str()
-                                            + "/stat";
-
-                                        if let Ok(file) =
-                                            tokio::fs::File::open(stat_path).await.as_mut()
-                                        {
-                                            let _ = file.read_to_end(&mut contents_2).await;
-
-                                            let output = String::from_utf8(contents_2).unwrap();
-
-                                            let splits: Vec<&str> =
-                                                output.split_whitespace().collect();
-
-                                            if let (Some(user_time), Some(system_time)) =
-                                                { (splits.get(13), splits.get(14)) }
-                                            {
-                                                if let (
-                                                    Ok(parsed_user_time),
-                                                    Ok(parsed_system_time),
-                                                ) = {
-                                                    (
-                                                        user_time.parse::<u64>(),
-                                                        system_time.parse::<u64>(),
-                                                    )
-                                                } {
-                                                    if let Some(entry) =
-                                                        cpu_proc_stat_cache.get(&pid)
-                                                    {
-                                                        let nb_processors = 8;
-
-                                                        let delta_user = parsed_user_time
-                                                            .saturating_sub(entry.user_time);
-                                                        let delta_system = parsed_system_time
-                                                            .saturating_sub(entry.system_time);
-
-                                                        let ticks =
-                                                            (delta_user + delta_system) as f32;
-
-                                                        let elapsed_seconds = last_sample_time
-                                                            .elapsed()
-                                                            .as_secs_f32();
-
-                                                        let cpu_usage = (ticks
-                                                            * nb_processors as f32)
-                                                            / (100.0 * elapsed_seconds);
-
-                                                        statm_result.cpu_usage = cpu_usage;
-                                                        let _ = cpu_proc_stat_cache.insert(
-                                                            pid,
-                                                            ProcessCpuTime {
-                                                                user_time: parsed_user_time,
-                                                                system_time: parsed_system_time,
-                                                            },
-                                                        );
-                                                    } else {
-                                                        cpu_proc_stat_cache.insert(
-                                                            pid,
-                                                            ProcessCpuTime {
-                                                                user_time: parsed_user_time,
-                                                                system_time: parsed_system_time,
-                                                            },
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        if !statm_result.name.is_empty() && statm_result.vm_size > 0
-                                        {
-                                            proc_stats.push(statm_result);
-                                        }
-                                    }
-                                }
-
-                                if let Ok(file) = tokio::fs::File::open("/proc/stat").await.as_mut()
-                                {
-                                    let mut contents = Vec::new();
-                                    let _ = file.read_to_end(&mut contents).await;
-
-                                    let output2 = String::from_utf8(contents).unwrap();
-
-                                    for line in output2.lines() {
-                                        if !line.starts_with("cpu") {
-                                            break;
-                                        }
-
-                                        let splits: Vec<&str> = line.split_whitespace().collect();
-
-                                        if let (
-                                            Some(r_cpu_id),
-                                            Some(r_user),
-                                            Some(r_nice),
-                                            Some(r_system),
-                                            Some(r_idle),
-                                            Some(r_iowait),
-                                            Some(r_irq),
-                                            Some(r_softirq),
-                                            Some(r_steal),
-                                        ) = {
-                                            (
-                                                splits.get(0),
-                                                splits.get(1),
-                                                splits.get(2),
-                                                splits.get(3),
-                                                splits.get(4),
-                                                splits.get(5),
-                                                splits.get(6),
-                                                splits.get(7),
-                                                splits.get(8),
-                                            )
-                                        } {
-                                            if let (
-                                                Ok(user),
-                                                Ok(nice),
-                                                Ok(system),
-                                                Ok(idle),
-                                                Ok(iowait),
-                                                Ok(irq),
-                                                Ok(softirq),
-                                                Ok(steal),
-                                            ) = {
-                                                (
-                                                    r_user.parse::<u64>(),
-                                                    r_nice.parse::<u64>(),
-                                                    r_system.parse::<u64>(),
-                                                    r_idle.parse::<u64>(),
-                                                    r_iowait.parse::<u64>(),
-                                                    r_irq.parse::<u64>(),
-                                                    r_softirq.parse::<u64>(),
-                                                    r_steal.parse::<u64>(),
-                                                )
-                                            } {
-                                                let total_idle = idle + iowait;
-                                                let total = user
-                                                    + nice
-                                                    + system
-                                                    + total_idle
-                                                    + irq
-                                                    + softirq
-                                                    + steal;
-                                                let work_time = total - total_idle;
-
-                                                if let Some(old_cpu_usage) = cpu_usage_state
-                                                    .get_mut(r_cpu_id.to_owned())
-                                                {
-                                                    let cpu_usage = ((work_time
-                                                        - old_cpu_usage.work_time)
-                                                        as f32
-                                                        / (total - old_cpu_usage.total_time)
-                                                            as f32)
-                                                        * 100.0;
-                                                    mem_info
-                                                        .cpu_usage
-                                                        .insert(r_cpu_id.to_string(), cpu_usage);
-
-                                                    old_cpu_usage.total_time = total;
-                                                    old_cpu_usage.work_time = work_time;
-                                                } else {
-                                                    cpu_usage_state.insert(
-                                                        r_cpu_id.to_string(),
-                                                        CpuUsageState {
-                                                            work_time: 0,
-                                                            total_time: 0,
-                                                        },
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                mem_info.process_stats = proc_stats;
-                                mem_info.process_stats.sort_by_key(|u| Reverse(u.vm_rss));
-                                send.send(mem_info).await.unwrap();
-                                last_sample_time = time::Instant::now();
                             }
-                        });
-                        task.await.unwrap();
+
+                            mem_info.cpu_usage = get_proc_stat_data(&mut cpu_usage_state).await;
+
+                            mem_info.process_stats = proc_stats;
+                            mem_info.process_stats.sort_by_key(|u| Reverse(u.vm_rss));
+                            send.send(mem_info).await.unwrap();
+                            last_sample_time = time::Instant::now();
+                        }
                     });
+                    task.await.unwrap();
+                });
             });
 
         InfoReceiver { reciver: recv }
@@ -551,4 +309,211 @@ pub struct ProcStatus {
     pub rss_shem: u64,
     pub rss_proc: f32,
     pub cpu_usage: f32,
+}
+
+fn get_free_and_total_memory() -> (u64, u64) {
+    unsafe {
+        let mut info: libc::sysinfo = mem::zeroed();
+
+        if libc::sysinfo(&mut info) == 0 {
+            return (info.freeram, info.totalram);
+        } else {
+            eprintln!("Failed to get system info.");
+        }
+    }
+
+    return (0, 0);
+}
+
+async fn get_proc_pid_stat_cpu_usage(
+    pid_id: i32,
+    elapsed_seconds: f32,
+    cpu_proc_stat_cache: &mut HashMap<i32, ProcessCpuTime>,
+) -> f32 {
+    let mut contents_2 = Vec::new();
+
+    let stat_path = "/proc/".to_string() + pid_id.to_string().as_str() + "/stat";
+
+    if let Ok(file) = tokio::fs::File::open(stat_path).await.as_mut() {
+        let _ = file.read_to_end(&mut contents_2).await;
+
+        let output = String::from_utf8(contents_2).unwrap();
+
+        let splits: Vec<&str> = output.split_whitespace().collect();
+
+        if let (Some(user_time), Some(system_time)) = { (splits.get(13), splits.get(14)) } {
+            if let (Ok(parsed_user_time), Ok(parsed_system_time)) =
+                { (user_time.parse::<u64>(), system_time.parse::<u64>()) }
+            {
+                if let Some(entry) = cpu_proc_stat_cache.get(&pid_id) {
+                    let nb_processors = 8;
+
+                    let delta_user = parsed_user_time.saturating_sub(entry.user_time);
+                    let delta_system = parsed_system_time.saturating_sub(entry.system_time);
+
+                    let ticks = (delta_user + delta_system) as f32;
+
+                    let cpu_usage = (ticks * nb_processors as f32) / (100.0 * elapsed_seconds);
+
+                    let _ = cpu_proc_stat_cache.insert(
+                        pid_id,
+                        ProcessCpuTime {
+                            user_time: parsed_user_time,
+                            system_time: parsed_system_time,
+                        },
+                    );
+                    return cpu_usage;
+                } else {
+                    cpu_proc_stat_cache.insert(
+                        pid_id,
+                        ProcessCpuTime {
+                            user_time: parsed_user_time,
+                            system_time: parsed_system_time,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    return 0.0;
+}
+
+async fn get_proc_pid_status(pid_id: i32, total_memory: u64) -> ProcStatus {
+    let mut statm_result = ProcStatus::default();
+
+    let status_path = "/proc/".to_string() + pid_id.to_string().as_str() + "/status";
+
+    let mut contents = Vec::new();
+
+    if let Ok(file) = tokio::fs::File::open(status_path).await.as_mut() {
+        let _ = file.read_to_end(&mut contents).await;
+
+        let output = String::from_utf8(contents).unwrap();
+
+        for line in output.lines() {
+            if let Some(matching) = line.strip_prefix("Name:") {
+                statm_result.name = matching.trim_start().to_string();
+            } else if let Some(matching) = line.strip_prefix("Pid:") {
+                if let Ok(parsed_pid) = matching.trim_start().parse() {
+                    statm_result.pid = parsed_pid;
+                }
+            } else if let Some(matching) = line.strip_prefix("VmSize:") {
+                if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
+                    if let Ok(parsed) = digit_part.parse::<u64>() {
+                        statm_result.vm_size = parsed;
+                    }
+                }
+            } else if let Some(matching) = line.strip_prefix("VmRSS:") {
+                if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
+                    if let Ok(parsed) = digit_part.parse::<u64>() {
+                        statm_result.vm_rss = parsed;
+                        statm_result.rss_proc =
+                            (parsed * 1024) as f32 / (total_memory as f32) * 100.0;
+                    }
+                }
+            } else if let Some(matching) = line.strip_prefix("RssShmem:") {
+                if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
+                    if let Ok(parsed) = digit_part.parse::<u64>() {
+                        statm_result.rss_shem = parsed;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    return statm_result;
+}
+
+async fn get_proc_stat_data(
+    cpu_usage_state_cache: &mut HashMap<String, CpuUsageState>,
+) -> BTreeMap<String, f32> {
+    let mut output: BTreeMap<String, f32> = BTreeMap::new();
+
+    if let Ok(file) = tokio::fs::File::open("/proc/stat").await.as_mut() {
+        let mut contents = Vec::new();
+        let _ = file.read_to_end(&mut contents).await;
+
+        let output2 = String::from_utf8(contents).unwrap();
+
+        for line in output2.lines() {
+            if !line.starts_with("cpu") {
+                return output;
+            }
+
+            let splits: Vec<&str> = line.split_whitespace().collect();
+
+            if let (
+                Some(r_cpu_id),
+                Some(r_user),
+                Some(r_nice),
+                Some(r_system),
+                Some(r_idle),
+                Some(r_iowait),
+                Some(r_irq),
+                Some(r_softirq),
+                Some(r_steal),
+            ) = {
+                (
+                    splits.get(0),
+                    splits.get(1),
+                    splits.get(2),
+                    splits.get(3),
+                    splits.get(4),
+                    splits.get(5),
+                    splits.get(6),
+                    splits.get(7),
+                    splits.get(8),
+                )
+            } {
+                if let (
+                    Ok(user),
+                    Ok(nice),
+                    Ok(system),
+                    Ok(idle),
+                    Ok(iowait),
+                    Ok(irq),
+                    Ok(softirq),
+                    Ok(steal),
+                ) = {
+                    (
+                        r_user.parse::<u64>(),
+                        r_nice.parse::<u64>(),
+                        r_system.parse::<u64>(),
+                        r_idle.parse::<u64>(),
+                        r_iowait.parse::<u64>(),
+                        r_irq.parse::<u64>(),
+                        r_softirq.parse::<u64>(),
+                        r_steal.parse::<u64>(),
+                    )
+                } {
+                    let total_idle = idle + iowait;
+                    let total = user + nice + system + total_idle + irq + softirq + steal;
+                    let work_time = total - total_idle;
+
+                    if let Some(old_cpu_usage) = cpu_usage_state_cache.get_mut(r_cpu_id.to_owned())
+                    {
+                        let cpu_usage = ((work_time - old_cpu_usage.work_time) as f32
+                            / (total - old_cpu_usage.total_time) as f32)
+                            * 100.0;
+                        output.insert(r_cpu_id.to_string(), cpu_usage);
+
+                        old_cpu_usage.total_time = total;
+                        old_cpu_usage.work_time = work_time;
+                    } else {
+                        cpu_usage_state_cache.insert(
+                            r_cpu_id.to_string(),
+                            CpuUsageState {
+                                work_time: 0,
+                                total_time: 0,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    return output;
 }
