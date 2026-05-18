@@ -442,78 +442,65 @@ async fn get_proc_stat_data(
                 return output;
             }
 
-            let splits: Vec<&str> = line.split_whitespace().collect();
+            if let Ok(cpu_times) = parse_cpu_times(&line) {
+                let total_idle_time = cpu_times.idle + cpu_times.iowait;
+                let total_time = cpu_times.user
+                    + cpu_times.nice
+                    + cpu_times.system
+                    + total_idle_time
+                    + cpu_times.irq
+                    + cpu_times.softirq
+                    + cpu_times.steal;
+                let work_time = total_time - total_idle_time;
 
-            if let (
-                Some(r_cpu_id),
-                Some(r_user),
-                Some(r_nice),
-                Some(r_system),
-                Some(r_idle),
-                Some(r_iowait),
-                Some(r_irq),
-                Some(r_softirq),
-                Some(r_steal),
-            ) = {
-                (
-                    splits.get(0),
-                    splits.get(1),
-                    splits.get(2),
-                    splits.get(3),
-                    splits.get(4),
-                    splits.get(5),
-                    splits.get(6),
-                    splits.get(7),
-                    splits.get(8),
-                )
-            } {
-                if let (
-                    Ok(user),
-                    Ok(nice),
-                    Ok(system),
-                    Ok(idle),
-                    Ok(iowait),
-                    Ok(irq),
-                    Ok(softirq),
-                    Ok(steal),
-                ) = {
-                    (
-                        r_user.parse::<u64>(),
-                        r_nice.parse::<u64>(),
-                        r_system.parse::<u64>(),
-                        r_idle.parse::<u64>(),
-                        r_iowait.parse::<u64>(),
-                        r_irq.parse::<u64>(),
-                        r_softirq.parse::<u64>(),
-                        r_steal.parse::<u64>(),
-                    )
-                } {
-                    let total_idle = idle + iowait;
-                    let total = user + nice + system + total_idle + irq + softirq + steal;
-                    let work_time = total - total_idle;
+                if let Some(old_cpu_usage) = cpu_usage_state_cache.get_mut(&cpu_times.cpu_name) {
+                    let cpu_usage = ((work_time - old_cpu_usage.work_time) as f32
+                        / (total_time - old_cpu_usage.total_time) as f32)
+                        * 100.0;
+                    output.insert(cpu_times.cpu_name, cpu_usage);
 
-                    if let Some(old_cpu_usage) = cpu_usage_state_cache.get_mut(r_cpu_id.to_owned())
-                    {
-                        let cpu_usage = ((work_time - old_cpu_usage.work_time) as f32
-                            / (total - old_cpu_usage.total_time) as f32)
-                            * 100.0;
-                        output.insert(r_cpu_id.to_string(), cpu_usage);
-
-                        old_cpu_usage.total_time = total;
-                        old_cpu_usage.work_time = work_time;
-                    } else {
-                        cpu_usage_state_cache.insert(
-                            r_cpu_id.to_string(),
-                            CpuUsageState {
-                                work_time: 0,
-                                total_time: 0,
-                            },
-                        );
-                    }
+                    old_cpu_usage.total_time = total_time;
+                    old_cpu_usage.work_time = work_time;
+                } else {
+                    cpu_usage_state_cache.insert(
+                        cpu_times.cpu_name.to_string(),
+                        CpuUsageState {
+                            work_time: 0,
+                            total_time: 0,
+                        },
+                    );
                 }
             }
         }
     }
 
     return output;
+}
+
+#[derive(Debug, Default)]
+struct CpuTimes {
+    cpu_name: String,
+    user: u64,
+    nice: u64,
+    system: u64,
+    idle: u64,
+    iowait: u64,
+    irq: u64,
+    softirq: u64,
+    steal: u64,
+}
+
+fn parse_cpu_times(line: &str) -> Result<CpuTimes, std::num::ParseIntError> {
+    let mut iter = line.split_whitespace();
+    Ok(CpuTimes {
+        cpu_name: iter.next().unwrap().to_owned(),
+        user: iter.next().unwrap().parse()?,
+        nice: iter.next().unwrap().parse()?,
+        system: iter.next().unwrap().parse()?,
+        idle: iter.next().unwrap().parse()?,
+        iowait: iter.next().unwrap().parse()?,
+        irq: iter.next().unwrap().parse()?,
+        softirq: iter.next().unwrap().parse()?,
+        steal: iter.next().unwrap().parse()?,
+    })
 }
