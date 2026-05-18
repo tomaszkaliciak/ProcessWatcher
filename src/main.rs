@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Block, Gauge, LineGauge, List, ListItem, Paragraph, Row, Table, TableState, Widget},
 };
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::mem;
@@ -25,12 +25,16 @@ use tokio::time::{self, Duration};
 pub struct MemInfo {
     total_memory: u64,
     free_memory: u64,
-    cpu_usage: f32,
+    cpu_usage: BTreeMap<String, f32>,
     process_stats: Vec<ProcStatus>,
 }
 
 impl MemInfo {
-    pub fn send(state: (u64, u64), cpu_usage: f32, proc_stats: Vec<ProcStatus>) -> MemInfo {
+    pub fn send(
+        state: (u64, u64),
+        cpu_usage: BTreeMap<String, f32>,
+        proc_stats: Vec<ProcStatus>,
+    ) -> MemInfo {
         MemInfo {
             total_memory: state.0,
             free_memory: state.1,
@@ -52,7 +56,7 @@ fn main() -> io::Result<()> {
 pub struct App {
     totalram: u64,
     freeram: u64,
-    cpu_usage: f32,
+    cpu_usage: BTreeMap<String, f32>,
     proc_info: Vec<ProcStatus>,
     exit: bool,
 }
@@ -98,8 +102,6 @@ impl App {
             self.totalram.to_string().yellow(),
             " Free memory (KB): ".into(),
             self.freeram.to_string().green(),
-            " CPU USAGE: ".into(),
-            self.cpu_usage.to_string().green(),
         ])]);
 
         let chunks = Layout::default()
@@ -107,7 +109,7 @@ impl App {
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(1),
-                Constraint::Length(3),
+                Constraint::Length(8),
             ])
             .spacing(1)
             .split(frame.area());
@@ -134,22 +136,27 @@ impl App {
             ]));
         }
 
-        // let gauge = Gauge::default()
-        //     .gauge_style(Style::new().green().on_black())
-        //     .label("CPU usage")
-        //     .percent(self.cpu_usage as u16);
-        //
-        //
-        //
-        //
-        let cpu_usage_procent = self.cpu_usage / 100.0;
+        let constraints_cpu_usage: Vec<Constraint> = self
+            .cpu_usage
+            .iter()
+            .map(|_| Constraint::Length(1))
+            .collect();
 
-        let line_gauge = LineGauge::default()
-            .filled_style(Style::new().white().on_red().bold())
-            .unfilled_style(Style::new().gray().on_black())
-            .label(cpu_usage_procent.to_string())
-            .ratio((self.cpu_usage / 100.0) as f64);
-        frame.render_widget(line_gauge, chunks[2]);
+        let chunks_cpu = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints_cpu_usage)
+            .split(chunks[2]);
+
+        for (i, entry) in self.cpu_usage.iter().enumerate() {
+            let cpu_usage_procent = entry.1 / 100.0;
+            let line_gauge = LineGauge::default()
+                .filled_style(Style::new().white().on_red().bold())
+                .unfilled_style(Style::new().gray().on_black())
+                .label(String::from(entry.0) + " " + cpu_usage_procent.to_string().as_str())
+                .ratio((entry.1 / 100.0) as f64);
+
+            frame.render_widget(line_gauge, chunks_cpu[i]);
+        }
 
         let widths = [
             Constraint::Percentage(10),
@@ -213,6 +220,11 @@ struct ProcessCpuTime {
     system_time: u64,
 }
 
+struct CpuUsageState {
+    work_time: u64,
+    total_time: u64,
+}
+
 impl InfoReceiver {
     pub fn new() -> InfoReceiver {
         let (send, recv) = mpsc::channel(10);
@@ -228,8 +240,9 @@ impl InfoReceiver {
                                 HashMap::new();
 
                             let mut last_sample_time = time::Instant::now();
-                            let mut old_cpu_work_time = 0;
-                            let mut old_cpu_total_time = 0;
+
+                            let mut cpu_usage_state: HashMap<String, CpuUsageState> =
+                                HashMap::new();
 
                             let mut interval = time::interval(Duration::from_secs(2));
                             loop {
@@ -423,72 +436,94 @@ impl InfoReceiver {
                                     let mut contents = Vec::new();
                                     let _ = file.read_to_end(&mut contents).await;
 
-                                    let output = String::from_utf8(contents).unwrap();
+                                    let output2 = String::from_utf8(contents).unwrap();
 
-                                    let splits: Vec<&str> = output.split_whitespace().collect();
+                                    for line in output2.lines() {
+                                        if !line.starts_with("cpu") {
+                                            break;
+                                        }
 
-                                    if let (
-                                        Some(r_user),
-                                        Some(r_nice),
-                                        Some(r_system),
-                                        Some(r_idle),
-                                        Some(r_iowait),
-                                        Some(r_irq),
-                                        Some(r_softirq),
-                                        Some(r_steal),
-                                    ) = {
-                                        (
-                                            splits.get(1),
-                                            splits.get(2),
-                                            splits.get(3),
-                                            splits.get(4),
-                                            splits.get(5),
-                                            splits.get(6),
-                                            splits.get(7),
-                                            splits.get(8),
-                                        )
-                                    } {
+                                        let splits: Vec<&str> = line.split_whitespace().collect();
+
                                         if let (
-                                            Ok(user),
-                                            Ok(nice),
-                                            Ok(system),
-                                            Ok(idle),
-                                            Ok(iowait),
-                                            Ok(irq),
-                                            Ok(softirq),
-                                            Ok(steal),
+                                            Some(r_cpu_id),
+                                            Some(r_user),
+                                            Some(r_nice),
+                                            Some(r_system),
+                                            Some(r_idle),
+                                            Some(r_iowait),
+                                            Some(r_irq),
+                                            Some(r_softirq),
+                                            Some(r_steal),
                                         ) = {
                                             (
-                                                r_user.parse::<u64>(),
-                                                r_nice.parse::<u64>(),
-                                                r_system.parse::<u64>(),
-                                                r_idle.parse::<u64>(),
-                                                r_iowait.parse::<u64>(),
-                                                r_irq.parse::<u64>(),
-                                                r_softirq.parse::<u64>(),
-                                                r_steal.parse::<u64>(),
+                                                splits.get(0),
+                                                splits.get(1),
+                                                splits.get(2),
+                                                splits.get(3),
+                                                splits.get(4),
+                                                splits.get(5),
+                                                splits.get(6),
+                                                splits.get(7),
+                                                splits.get(8),
                                             )
                                         } {
-                                            let total_idle = idle + iowait;
-                                            let total = user
-                                                + nice
-                                                + system
-                                                + total_idle
-                                                + irq
-                                                + softirq
-                                                + steal;
-                                            let work_time = total - total_idle;
+                                            if let (
+                                                Ok(user),
+                                                Ok(nice),
+                                                Ok(system),
+                                                Ok(idle),
+                                                Ok(iowait),
+                                                Ok(irq),
+                                                Ok(softirq),
+                                                Ok(steal),
+                                            ) = {
+                                                (
+                                                    r_user.parse::<u64>(),
+                                                    r_nice.parse::<u64>(),
+                                                    r_system.parse::<u64>(),
+                                                    r_idle.parse::<u64>(),
+                                                    r_iowait.parse::<u64>(),
+                                                    r_irq.parse::<u64>(),
+                                                    r_softirq.parse::<u64>(),
+                                                    r_steal.parse::<u64>(),
+                                                )
+                                            } {
+                                                let total_idle = idle + iowait;
+                                                let total = user
+                                                    + nice
+                                                    + system
+                                                    + total_idle
+                                                    + irq
+                                                    + softirq
+                                                    + steal;
+                                                let work_time = total - total_idle;
 
-                                            if old_cpu_total_time != 0 && old_cpu_work_time != 0 {
-                                                let cpu_usage = ((work_time - old_cpu_work_time)
-                                                    as f32
-                                                    / (total - old_cpu_total_time) as f32)
-                                                    * 100.0;
-                                                mem_info.cpu_usage = cpu_usage;
+                                                if let Some(old_cpu_usage) = cpu_usage_state
+                                                    .get_mut(r_cpu_id.to_owned())
+                                                {
+                                                    let cpu_usage = ((work_time
+                                                        - old_cpu_usage.work_time)
+                                                        as f32
+                                                        / (total - old_cpu_usage.total_time)
+                                                            as f32)
+                                                        * 100.0;
+                                                    mem_info
+                                                        .cpu_usage
+                                                        .insert(r_cpu_id.to_string(), cpu_usage);
+
+                                                    old_cpu_usage.total_time = total;
+                                                    old_cpu_usage.work_time = work_time;
+                                                } else {
+                                                    cpu_usage_state.insert(
+                                                        r_cpu_id.to_string(),
+                                                        CpuUsageState {
+                                                            work_time: 0,
+                                                            total_time: 0,
+                                                        },
+                                                    );
+                                                }
                                             }
-
-                                            old_cpu_total_time = total;
-                                            old_cpu_work_time = work_time;
                                         }
                                     }
                                 }
