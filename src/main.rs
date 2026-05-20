@@ -143,7 +143,7 @@ impl App {
                 ListItem::new(Line::from(vec![
                     Span::raw(symbols::DOT),
                     Span::styled(
-                        format!("{:>3}", key),
+                        format!("{}", key),
                         Style::default()
                             .fg(Color::LightGreen)
                             .add_modifier(Modifier::BOLD),
@@ -155,21 +155,22 @@ impl App {
         let list = List::new(items);
         frame.render_widget(list, chunks[2]);
 
-        for (i, (_, cpu_usage)) in self.cpu_usage.iter().enumerate() {
+        let chunk = chunks[2];
+        let max_rows = chunk.height as usize; // each gauge is one row high
+
+        for (i, (_, usage)) in self.cpu_usage.iter().take(max_rows).enumerate() {
+            let y = chunk.top() + i as u16;
+
             let gauge = Gauge::default()
                 .gauge_style(Style::default().fg(Color::Yellow))
-                .ratio((cpu_usage / 100.0) as f64);
-
-            if chunks[2].top().saturating_add(i as u16) > 65 {
-                continue;
-            }
+                .ratio((usage / 100.0) as f64);
 
             frame.render_widget(
                 gauge,
                 Rect {
-                    x: chunks[2].left() + 7,
-                    y: chunks[2].top().saturating_add(i as u16),
-                    width: chunks[2].width - 1,
+                    x: chunk.left() + 10,
+                    y,
+                    width: chunk.width.saturating_sub(10),
                     height: 1,
                 },
             );
