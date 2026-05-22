@@ -1,7 +1,7 @@
 use libc;
 
 use crossterm::event::{self, KeyCode};
-use ratatui::layout::{Constraint, Direction, Layout, Rect, Rows};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::symbols;
 use ratatui::{
@@ -9,9 +9,8 @@ use ratatui::{
     style::{Modifier, Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Gauge, LineGauge, List, ListItem, Paragraph, Row, Table, TableState, Widget},
+    widgets::{Block, Gauge, List, ListItem, Paragraph, Row, Table, TableState},
 };
-use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
@@ -52,12 +51,48 @@ fn main() -> io::Result<()> {
     ratatui::run(|terminal| App::default().run(terminal))
 }
 
+const UI_COLUMNS: [ProcessUiColumn; 7] = [
+    ProcessUiColumn::Name,
+    ProcessUiColumn::Pid,
+    ProcessUiColumn::VmSize,
+    ProcessUiColumn::VmRss,
+    ProcessUiColumn::RssShem,
+    ProcessUiColumn::RssProc,
+    ProcessUiColumn::CpuUsage,
+];
+
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
+enum ProcessUiColumn {
+    Name,
+    Pid,
+    VmSize,
+    #[default]
+    VmRss,
+    RssShem,
+    RssProc,
+    CpuUsage,
+}
+
+#[derive(Debug, Default, PartialEq)]
+enum SortOrder {
+    Ascending,
+    #[default]
+    Descending,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct TableOrderSettings {
+    order_by_field: ProcessUiColumn,
+    order: SortOrder,
+}
+
 #[derive(Debug, Default)]
 pub struct App {
     totalram: u64,
     freeram: u64,
     cpu_usage: BTreeMap<String, f32>,
     proc_info: Vec<ProcStatus>,
+    table_order_settings: TableOrderSettings,
     exit: bool,
 }
 
@@ -79,9 +114,31 @@ impl App {
                 self.totalram = result.total_memory;
                 self.proc_info = result.process_stats;
                 self.cpu_usage = result.cpu_usage;
+
+                self.sort();
             }
         }
         Ok(())
+    }
+
+    fn sort(&mut self) {
+        match self.table_order_settings.order_by_field {
+            ProcessUiColumn::Name => self.proc_info.sort_by(|a, b| a.name.cmp(&b.name)),
+            ProcessUiColumn::Pid => self.proc_info.sort_by_key(|u| u.pid),
+            ProcessUiColumn::VmSize => self.proc_info.sort_by_key(|u| u.vm_size),
+            ProcessUiColumn::VmRss => self.proc_info.sort_by_key(|u| u.vm_rss),
+            ProcessUiColumn::RssShem => self.proc_info.sort_by_key(|u| u.rss_shem),
+            ProcessUiColumn::RssProc => self
+                .proc_info
+                .sort_by(|u, v| u.rss_proc.total_cmp(&v.rss_proc)),
+            ProcessUiColumn::CpuUsage => self
+                .proc_info
+                .sort_by(|u, v| u.cpu_usage.total_cmp(&v.cpu_usage)),
+        }
+
+        if self.table_order_settings.order == SortOrder::Descending {
+            self.proc_info.reverse();
+        }
     }
 
     fn draw(&self, frame: &mut Frame, table_state: &mut TableState) {
@@ -156,7 +213,7 @@ impl App {
         frame.render_widget(list, chunks[2]);
 
         let chunk = chunks[2];
-        let max_rows = chunk.height as usize; // each gauge is one row high
+        let max_rows = chunk.height as usize;
 
         for (i, (_, usage)) in self.cpu_usage.iter().take(max_rows).enumerate() {
             let y = chunk.top() + i as u16;
@@ -208,6 +265,25 @@ impl App {
                         KeyCode::Up => table_state.select_previous(),
                         KeyCode::Right => table_state.select_next_column(),
                         KeyCode::Left => table_state.select_previous_column(),
+                        KeyCode::Char('s') => {
+                            if let Some(idx) = table_state.selected_column() {
+                                if let Some(col) = UI_COLUMNS.get(idx) {
+                                    if self.table_order_settings.order_by_field != *col {
+                                        self.table_order_settings.order_by_field = *col;
+                                        self.table_order_settings.order = SortOrder::Descending;
+                                    } else {
+                                        if self.table_order_settings.order == SortOrder::Ascending {
+                                            self.table_order_settings.order = SortOrder::Descending;
+                                        } else {
+                                            self.table_order_settings.order = SortOrder::Ascending;
+                                        }
+                                    }
+                                    self.sort();
+                                }
+                            }
+
+                            self.sort();
+                        }
                         _ => {}
                     }
                 }
@@ -305,7 +381,6 @@ impl InfoReceiver {
                             mem_info.cpu_usage = get_proc_stat_data(&mut cpu_usage_state).await;
 
                             mem_info.process_stats = proc_stats;
-                            mem_info.process_stats.sort_by_key(|u| Reverse(u.vm_rss));
                             send.send(mem_info).await.unwrap();
                             last_sample_time = time::Instant::now();
                         }
