@@ -20,19 +20,47 @@ use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
+use std::collections::VecDeque;
+
+struct RingBuffer<T> {
+    buf: VecDeque<T>,
+    capacity: usize,
+}
+
+impl<T> RingBuffer<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            buf: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn push(&mut self, item: T) {
+        if self.buf.len() == self.capacity {
+            self.buf.pop_back();
+        }
+        self.buf.push_front(item);
+    }
+}
+
+struct ProcessHistory {
+    pid: u64,
+    history: RingBuffer<ProcessStatus>,
+}
+
 #[derive(Debug, Default)]
 pub struct MemInfo {
     total_memory: u64,
     free_memory: u64,
     cpu_usage: BTreeMap<String, f32>,
-    process_stats: Vec<ProcStatus>,
+    process_stats: Vec<ProcessInfo>,
 }
 
 impl MemInfo {
     pub fn send(
         state: (u64, u64),
         cpu_usage: BTreeMap<String, f32>,
-        proc_stats: Vec<ProcStatus>,
+        proc_stats: Vec<ProcessInfo>,
     ) -> MemInfo {
         MemInfo {
             total_memory: state.0,
@@ -91,7 +119,7 @@ pub struct App {
     totalram: u64,
     freeram: u64,
     cpu_usage: BTreeMap<String, f32>,
-    proc_info: Vec<ProcStatus>,
+    proc_info: Vec<ProcessInfo>,
     table_order_settings: TableOrderSettings,
     exit: bool,
 }
@@ -125,15 +153,15 @@ impl App {
         match self.table_order_settings.order_by_field {
             ProcessUiColumn::Command => self.proc_info.sort_by(|a, b| a.command.cmp(&b.command)),
             ProcessUiColumn::Pid => self.proc_info.sort_by_key(|u| u.pid),
-            ProcessUiColumn::VmSize => self.proc_info.sort_by_key(|u| u.vm_size),
-            ProcessUiColumn::VmRss => self.proc_info.sort_by_key(|u| u.vm_rss),
-            ProcessUiColumn::RssShem => self.proc_info.sort_by_key(|u| u.rss_shem),
+            ProcessUiColumn::VmSize => self.proc_info.sort_by_key(|u| u.status.vm_size),
+            ProcessUiColumn::VmRss => self.proc_info.sort_by_key(|u| u.status.vm_rss),
+            ProcessUiColumn::RssShem => self.proc_info.sort_by_key(|u| u.status.rss_shem),
             ProcessUiColumn::RssProc => self
                 .proc_info
-                .sort_by(|u, v| u.rss_proc.total_cmp(&v.rss_proc)),
+                .sort_by(|u, v| u.status.rss_proc.total_cmp(&v.status.rss_proc)),
             ProcessUiColumn::CpuUsage => self
                 .proc_info
-                .sort_by(|u, v| u.cpu_usage.total_cmp(&v.cpu_usage)),
+                .sort_by(|u, v| u.status.cpu_usage.total_cmp(&v.status.cpu_usage)),
         }
 
         if self.table_order_settings.order == SortOrder::Descending {
@@ -184,11 +212,11 @@ impl App {
         for proc_info in &self.proc_info {
             rows.push(Row::new([
                 proc_info.pid.to_string(),
-                proc_info.vm_size.to_string(),
-                proc_info.vm_rss.to_string(),
-                proc_info.rss_shem.to_string(),
-                proc_info.rss_proc.to_string(),
-                format!("{:>2.4}", proc_info.cpu_usage.to_string()),
+                proc_info.status.vm_size.to_string(),
+                proc_info.status.vm_rss.to_string(),
+                proc_info.status.rss_shem.to_string(),
+                proc_info.status.rss_proc.to_string(),
+                format!("{:>2.4}", proc_info.status.cpu_usage.to_string()),
                 proc_info.command.clone(),
             ]));
         }
@@ -260,7 +288,6 @@ impl App {
                 if let Ok(event::Event::Key(key)) = event::read() {
                     match key.code {
                         KeyCode::Char('q') => self.exit(),
-                        KeyCode::Char('u') => self.update(),
                         KeyCode::Down => table_state.select_next(),
                         KeyCode::Up => table_state.select_previous(),
                         KeyCode::Right => table_state.select_next_column(),
@@ -293,18 +320,6 @@ impl App {
         }
     }
 
-    fn update(&mut self) {
-        unsafe {
-            let mut info: libc::sysinfo = mem::zeroed();
-
-            if libc::sysinfo(&mut info) == 0 {
-                self.freeram = info.freeram;
-                self.totalram = info.totalram;
-            } else {
-                eprintln!("Failed to get system info.");
-            }
-        }
-    }
     fn exit(&mut self) {
         self.exit = true;
     }
@@ -373,12 +388,18 @@ impl InfoReceiver {
                                     )
                                     .await;
 
-                                    if let Some(cmd) = get_proc_pid_cmd(pid).await {
-                                        statm_result.command = cmd;
+                                    if statm_result.vm_size == 0 {
+                                        continue;
                                     }
-                                    if !statm_result.command.is_empty() && statm_result.vm_size > 0
-                                    {
-                                        proc_stats.push(statm_result);
+
+                                    if let Some(cmd) = get_proc_pid_cmd(pid).await {
+                                        let process_info = ProcessInfo {
+                                            command: cmd,
+                                            pid: pid as u64,
+                                            status: statm_result,
+                                        };
+
+                                        proc_stats.push(process_info);
                                     }
                                 }
                             }
@@ -399,9 +420,14 @@ impl InfoReceiver {
 }
 
 #[derive(Debug, Default)]
-pub struct ProcStatus {
+pub struct ProcessInfo {
     pub command: String,
     pub pid: u64,
+    pub status: ProcessStatus,
+}
+
+#[derive(Debug, Default)]
+pub struct ProcessStatus {
     pub vm_size: u64,
     pub vm_rss: u64,
     pub rss_shem: u64,
@@ -491,8 +517,8 @@ async fn get_proc_pid_cmd(pid_id: i32) -> Option<String> {
     return None;
 }
 
-async fn get_proc_pid_status(pid_id: i32, total_memory: u64) -> ProcStatus {
-    let mut statm_result = ProcStatus::default();
+async fn get_proc_pid_status(pid_id: i32, total_memory: u64) -> ProcessStatus {
+    let mut statm_result = ProcessStatus::default();
 
     let status_path = "/proc/".to_string() + pid_id.to_string().as_str() + "/status";
 
@@ -504,11 +530,7 @@ async fn get_proc_pid_status(pid_id: i32, total_memory: u64) -> ProcStatus {
         let output = String::from_utf8(contents).unwrap();
 
         for line in output.lines() {
-            if let Some(matching) = line.strip_prefix("Pid:") {
-                if let Ok(parsed_pid) = matching.trim_start().parse() {
-                    statm_result.pid = parsed_pid;
-                }
-            } else if let Some(matching) = line.strip_prefix("VmSize:") {
+            if let Some(matching) = line.strip_prefix("VmSize:") {
                 if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
                     if let Ok(parsed) = digit_part.parse::<u64>() {
                         statm_result.vm_size = parsed;
