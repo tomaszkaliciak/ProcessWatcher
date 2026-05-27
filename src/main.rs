@@ -22,6 +22,7 @@ use tokio::time::{self, Duration};
 
 use std::collections::VecDeque;
 
+#[derive(Debug, PartialEq)]
 struct RingBuffer<T> {
     buf: VecDeque<T>,
     capacity: usize,
@@ -43,6 +44,7 @@ impl<T> RingBuffer<T> {
     }
 }
 
+#[derive(Debug, PartialEq)]
 struct ProcessHistory {
     pid: u64,
     history: RingBuffer<ProcessStatus>,
@@ -121,6 +123,7 @@ pub struct App {
     cpu_usage: BTreeMap<String, f32>,
     proc_info: Vec<ProcessInfo>,
     table_order_settings: TableOrderSettings,
+    watched_pid: Option<ProcessHistory>,
     exit: bool,
 }
 
@@ -144,6 +147,19 @@ impl App {
                 self.cpu_usage = result.cpu_usage;
 
                 self.sort();
+
+                if let Some(currently_observered_pid) = &mut self.watched_pid {
+                    if let Some(intresting_pid) = &self
+                        .proc_info
+                        .iter()
+                        .find(|x| x.pid == currently_observered_pid.pid)
+                    {
+                        currently_observered_pid
+                            .history
+                            .push(intresting_pid.status.clone());
+                    }
+                    // TODO: handle process lifeime
+                }
             }
         }
         Ok(())
@@ -195,6 +211,7 @@ impl App {
                 Constraint::Length(3),
                 Constraint::Min(1),
                 Constraint::Length(8),
+                Constraint::Max(1),
             ])
             .spacing(1)
             .split(frame.area());
@@ -280,6 +297,19 @@ impl App {
             .highlight_symbol("() ");
 
         frame.render_stateful_widget(table, chunks[1], table_state);
+
+        if let Some(observed_pid) = &self.watched_pid {
+            if !observed_pid.history.buf.is_empty() {
+                let text = Text::from(
+                    observed_pid.pid.to_string()
+                        + ", Samples:"
+                        + observed_pid.history.buf.iter().len().to_string().as_str(),
+                );
+
+                let paragraph_2 = Paragraph::new(text).centered();
+                frame.render_widget(paragraph_2, chunks[3]);
+            }
+        }
     }
 
     fn handle_events(&mut self, table_state: &mut TableState) {
@@ -311,6 +341,22 @@ impl App {
                             }
 
                             self.sort();
+                        }
+                        KeyCode::Char('w') => {
+                            if let Some(idx) = table_state.selected_cell() {
+                                if let Some(selected_process) = self.proc_info.get(idx.0) {
+                                    if let Some(currently_observered_pid) = &self.watched_pid {
+                                        if currently_observered_pid.pid == selected_process.pid {
+                                            return;
+                                        }
+                                    }
+
+                                    self.watched_pid = Some(ProcessHistory {
+                                        pid: selected_process.pid,
+                                        history: RingBuffer::new(200),
+                                    });
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -419,14 +465,14 @@ impl InfoReceiver {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ProcessInfo {
     pub command: String,
     pub pid: u64,
     pub status: ProcessStatus,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
 pub struct ProcessStatus {
     pub vm_size: u64,
     pub vm_rss: u64,
