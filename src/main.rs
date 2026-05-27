@@ -15,12 +15,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::mem;
-use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::runtime::Builder;
-use tokio::sync::Mutex;
-
+use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
 #[derive(Debug, Default)]
@@ -46,7 +43,9 @@ impl MemInfo {
     }
 }
 
-pub struct InfoReceiver {}
+pub struct InfoReceiver {
+    reciver: mpsc::Receiver<MemInfo>,
+}
 
 fn main() -> io::Result<()> {
     ratatui::run(|terminal| App::default().run(terminal))
@@ -89,54 +88,67 @@ struct TableOrderSettings {
 
 #[derive(Debug, Default)]
 pub struct App {
+    totalram: u64,
+    freeram: u64,
+    cpu_usage: BTreeMap<String, f32>,
+    proc_info: Vec<ProcStatus>,
     table_order_settings: TableOrderSettings,
     exit: bool,
 }
 
 impl App {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        let mut info_receiver = InfoReceiver::new();
+
         let mut table_state = TableState::default();
         table_state.select_first();
         table_state.select_first_column();
 
-        let data = Arc::new(Mutex::new(MemInfo::default()));
-
-        let _ = InfoReceiver::new(data.clone());
-
         while !self.exit {
-            if let Ok(mut data_locked) = data.try_lock() {
-                terminal.draw(|frame| self.draw(frame, &mut table_state, &mut data_locked))?;
-            }
+            terminal.draw(|frame| self.draw(frame, &mut table_state))?;
 
             self.handle_events(&mut table_state);
+
+            while let Ok(result) = info_receiver.reciver.try_recv() {
+                self.freeram = result.free_memory;
+                self.totalram = result.total_memory;
+                self.proc_info = result.process_stats;
+                self.cpu_usage = result.cpu_usage;
+
+                self.sort();
+            }
         }
         Ok(())
     }
 
-    fn sort(&self, mem_info: &mut MemInfo) {
+    fn sort(&mut self) {
         match self.table_order_settings.order_by_field {
-            ProcessUiColumn::Name => mem_info.process_stats.sort_by(|a, b| a.name.cmp(&b.name)),
-            ProcessUiColumn::Pid => mem_info.process_stats.sort_by_key(|u| u.pid),
-            ProcessUiColumn::VmSize => mem_info.process_stats.sort_by_key(|u| u.vm_size),
-            ProcessUiColumn::VmRss => mem_info.process_stats.sort_by_key(|u| u.vm_rss),
-            ProcessUiColumn::RssShem => mem_info.process_stats.sort_by_key(|u| u.rss_shem),
-            ProcessUiColumn::RssProc => mem_info
-                .process_stats
+            ProcessUiColumn::Name => self.proc_info.sort_by(|a, b| a.name.cmp(&b.name)),
+            ProcessUiColumn::Pid => self.proc_info.sort_by_key(|u| u.pid),
+            ProcessUiColumn::VmSize => self.proc_info.sort_by_key(|u| u.vm_size),
+            ProcessUiColumn::VmRss => self.proc_info.sort_by_key(|u| u.vm_rss),
+            ProcessUiColumn::RssShem => self.proc_info.sort_by_key(|u| u.rss_shem),
+            ProcessUiColumn::RssProc => self
+                .proc_info
                 .sort_by(|u, v| u.rss_proc.total_cmp(&v.rss_proc)),
-            ProcessUiColumn::CpuUsage => mem_info
-                .process_stats
+            ProcessUiColumn::CpuUsage => self
+                .proc_info
                 .sort_by(|u, v| u.cpu_usage.total_cmp(&v.cpu_usage)),
         }
 
         if self.table_order_settings.order == SortOrder::Descending {
-            mem_info.process_stats.reverse();
+            self.proc_info.reverse();
         }
     }
 
-    fn draw(&self, frame: &mut Frame, table_state: &mut TableState, data: &mut MemInfo) {
-        self.sort(data);
+    fn draw(&self, frame: &mut Frame, table_state: &mut TableState) {
         let title = Line::from(" Process Watcher ".bold());
-        let instructions = Line::from(vec![" Quit ".into(), "<Q> ".blue().bold()]);
+        let instructions = Line::from(vec![
+            " Update ".into(),
+            "<u>".blue().bold(),
+            " Quit ".into(),
+            "<Q> ".blue().bold(),
+        ]);
         let block = Block::bordered()
             .title(title.centered())
             .title_bottom(instructions.centered())
@@ -144,9 +156,9 @@ impl App {
 
         let counter_text = Text::from(vec![Line::from(vec![
             "Total memory (KB): ".into(),
-            data.total_memory.to_string().yellow(),
+            self.totalram.to_string().yellow(),
             " Free memory (KB): ".into(),
-            data.free_memory.to_string().green(),
+            self.freeram.to_string().green(),
         ])]);
 
         let chunks = Layout::default()
@@ -169,7 +181,7 @@ impl App {
 
         let mut rows: Vec<Row> = Vec::new();
 
-        for proc_info in &data.process_stats {
+        for proc_info in &self.proc_info {
             rows.push(Row::new([
                 proc_info.name.clone(),
                 proc_info.pid.to_string(),
@@ -181,7 +193,7 @@ impl App {
             ]));
         }
 
-        let items: Vec<ListItem> = data
+        let items: Vec<ListItem> = self
             .cpu_usage
             .keys()
             .map(|key| {
@@ -203,7 +215,7 @@ impl App {
         let chunk = chunks[2];
         let max_rows = chunk.height as usize;
 
-        for (i, (_, usage)) in data.cpu_usage.iter().take(max_rows).enumerate() {
+        for (i, (_, usage)) in self.cpu_usage.iter().take(max_rows).enumerate() {
             let y = chunk.top() + i as u16;
 
             let gauge = Gauge::default()
@@ -248,6 +260,7 @@ impl App {
                 if let Ok(event::Event::Key(key)) = event::read() {
                     match key.code {
                         KeyCode::Char('q') => self.exit(),
+                        KeyCode::Char('u') => self.update(),
                         KeyCode::Down => table_state.select_next(),
                         KeyCode::Up => table_state.select_previous(),
                         KeyCode::Right => table_state.select_next_column(),
@@ -265,8 +278,11 @@ impl App {
                                             self.table_order_settings.order = SortOrder::Ascending;
                                         }
                                     }
+                                    self.sort();
                                 }
                             }
+
+                            self.sort();
                         }
                         _ => {}
                     }
@@ -276,6 +292,18 @@ impl App {
         }
     }
 
+    fn update(&mut self) {
+        unsafe {
+            let mut info: libc::sysinfo = mem::zeroed();
+
+            if libc::sysinfo(&mut info) == 0 {
+                self.freeram = info.freeram;
+                self.totalram = info.totalram;
+            } else {
+                eprintln!("Failed to get system info.");
+            }
+        }
+    }
     fn exit(&mut self) {
         self.exit = true;
     }
@@ -292,7 +320,9 @@ struct CpuUsageState {
 }
 
 impl InfoReceiver {
-    pub fn new(m_mem_info: Arc<Mutex<MemInfo>>) -> InfoReceiver {
+    pub fn new() -> InfoReceiver {
+        let (send, recv) = mpsc::channel(10);
+
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
 
         _ = std::thread::Builder::new()
@@ -310,9 +340,8 @@ impl InfoReceiver {
                         loop {
                             interval.tick().await;
 
-                            let mut mem_info = m_mem_info.lock().await;
+                            let mut mem_info: MemInfo = MemInfo::default();
 
-                            mem_info.process_stats.clear();
                             (mem_info.free_memory, mem_info.total_memory) =
                                 get_free_and_total_memory();
 
@@ -352,6 +381,7 @@ impl InfoReceiver {
                             mem_info.cpu_usage = get_proc_stat_data(&mut cpu_usage_state).await;
 
                             mem_info.process_stats = proc_stats;
+                            send.send(mem_info).await.unwrap();
                             last_sample_time = time::Instant::now();
                         }
                     });
@@ -359,7 +389,7 @@ impl InfoReceiver {
                 });
             });
 
-        InfoReceiver {}
+        InfoReceiver { reciver: recv }
     }
 }
 
