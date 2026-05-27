@@ -52,18 +52,18 @@ fn main() -> io::Result<()> {
 }
 
 const UI_COLUMNS: [ProcessUiColumn; 7] = [
-    ProcessUiColumn::Name,
     ProcessUiColumn::Pid,
     ProcessUiColumn::VmSize,
     ProcessUiColumn::VmRss,
     ProcessUiColumn::RssShem,
     ProcessUiColumn::RssProc,
     ProcessUiColumn::CpuUsage,
+    ProcessUiColumn::Command,
 ];
 
 #[derive(Debug, Default, PartialEq, Clone, Copy)]
 enum ProcessUiColumn {
-    Name,
+    Command,
     Pid,
     VmSize,
     #[default]
@@ -123,7 +123,7 @@ impl App {
 
     fn sort(&mut self) {
         match self.table_order_settings.order_by_field {
-            ProcessUiColumn::Name => self.proc_info.sort_by(|a, b| a.name.cmp(&b.name)),
+            ProcessUiColumn::Command => self.proc_info.sort_by(|a, b| a.command.cmp(&b.command)),
             ProcessUiColumn::Pid => self.proc_info.sort_by_key(|u| u.pid),
             ProcessUiColumn::VmSize => self.proc_info.sort_by_key(|u| u.vm_size),
             ProcessUiColumn::VmRss => self.proc_info.sort_by_key(|u| u.vm_rss),
@@ -175,7 +175,7 @@ impl App {
 
         frame.render_widget(paragraph, chunks[0]);
 
-        let header = Row::new(["name", "PID", "VIRT", "RSS", "SHR", "MEM(%)", "CPU(%)"])
+        let header = Row::new(["PID", "VIRT", "RSS", "SHR", "MEM(%)", "CPU(%)", "cmd"])
             .style(Style::new().bold())
             .bottom_margin(1);
 
@@ -183,13 +183,13 @@ impl App {
 
         for proc_info in &self.proc_info {
             rows.push(Row::new([
-                proc_info.name.clone(),
                 proc_info.pid.to_string(),
                 proc_info.vm_size.to_string(),
                 proc_info.vm_rss.to_string(),
                 proc_info.rss_shem.to_string(),
                 proc_info.rss_proc.to_string(),
                 format!("{:>2.4}", proc_info.cpu_usage.to_string()),
+                proc_info.command.clone(),
             ]));
         }
 
@@ -234,13 +234,13 @@ impl App {
         }
 
         let widths = [
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
+            Constraint::Max(6),
+            Constraint::Max(12),
+            Constraint::Max(12),
+            Constraint::Max(10),
+            Constraint::Max(10),
+            Constraint::Max(10),
+            Constraint::Min(30),
         ];
         let table = Table::new(rows, widths)
             .header(header)
@@ -279,6 +279,7 @@ impl App {
                                         }
                                     }
                                     self.sort();
+                                    return;
                                 }
                             }
 
@@ -372,7 +373,11 @@ impl InfoReceiver {
                                     )
                                     .await;
 
-                                    if !statm_result.name.is_empty() && statm_result.vm_size > 0 {
+                                    if let Some(cmd) = get_proc_pid_cmd(pid).await {
+                                        statm_result.command = cmd;
+                                    }
+                                    if !statm_result.command.is_empty() && statm_result.vm_size > 0
+                                    {
                                         proc_stats.push(statm_result);
                                     }
                                 }
@@ -395,7 +400,7 @@ impl InfoReceiver {
 
 #[derive(Debug, Default)]
 pub struct ProcStatus {
-    pub name: String,
+    pub command: String,
     pub pid: u64,
     pub vm_size: u64,
     pub vm_rss: u64,
@@ -472,6 +477,20 @@ async fn get_proc_pid_stat_cpu_usage(
     return 0.0;
 }
 
+async fn get_proc_pid_cmd(pid_id: i32) -> Option<String> {
+    let proc_pid_cmd_path = "/proc/".to_string() + pid_id.to_string().as_str() + "/cmdline";
+
+    let mut contents = Vec::new();
+
+    if let Ok(file) = tokio::fs::File::open(proc_pid_cmd_path).await.as_mut() {
+        let _ = file.read_to_end(&mut contents).await;
+
+        return String::from_utf8(contents).ok();
+    }
+
+    return None;
+}
+
 async fn get_proc_pid_status(pid_id: i32, total_memory: u64) -> ProcStatus {
     let mut statm_result = ProcStatus::default();
 
@@ -485,9 +504,7 @@ async fn get_proc_pid_status(pid_id: i32, total_memory: u64) -> ProcStatus {
         let output = String::from_utf8(contents).unwrap();
 
         for line in output.lines() {
-            if let Some(matching) = line.strip_prefix("Name:") {
-                statm_result.name = matching.trim_start().to_string();
-            } else if let Some(matching) = line.strip_prefix("Pid:") {
+            if let Some(matching) = line.strip_prefix("Pid:") {
                 if let Ok(parsed_pid) = matching.trim_start().parse() {
                     statm_result.pid = parsed_pid;
                 }
