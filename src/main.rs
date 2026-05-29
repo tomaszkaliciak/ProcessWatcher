@@ -11,16 +11,17 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Gauge, List, ListItem, Paragraph, Row, Table, TableState},
 };
+use std::collections::VecDeque;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::mem;
+use std::str::FromStr;
 use tokio::io::AsyncReadExt;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio::time::{self, Duration};
-
-use std::collections::VecDeque;
 
 #[derive(Debug, PartialEq)]
 struct RingBuffer<T> {
@@ -407,13 +408,13 @@ impl InfoReceiver {
                             (mem_info.free_memory, mem_info.total_memory) =
                                 get_free_and_total_memory();
 
-                            let paths = fs::read_dir("/proc").unwrap();
-
                             let mut proc_stats = Vec::new();
 
                             let elapsed_seconds = last_sample_time.elapsed().as_secs_f32();
 
-                            for path in paths {
+                            let mut set = JoinSet::new();
+
+                            for path in fs::read_dir("/proc").unwrap() {
                                 let pid_result: Result<i32, _> = path
                                     .unwrap()
                                     .path()
@@ -424,29 +425,49 @@ impl InfoReceiver {
                                     .parse();
 
                                 if let Ok(pid) = pid_result {
-                                    let mut statm_result =
-                                        get_proc_pid_status(pid, mem_info.total_memory).await;
+                                    set.spawn(async move {
+                                        let (stat, status, cmd) = tokio::join!(
+                                            tokio::fs::read_to_string(format!(
+                                                "/proc/{}/stat",
+                                                pid
+                                            )),
+                                            tokio::fs::read_to_string(format!(
+                                                "/proc/{}/status",
+                                                pid
+                                            )),
+                                            tokio::fs::read_to_string(format!(
+                                                "/proc/{}/cmdline",
+                                                pid
+                                            ))
+                                        );
+                                        Ok::<_, std::io::Error>((pid, stat, status, cmd))
+                                    });
+                                }
+                            }
 
-                                    statm_result.cpu_usage = get_proc_pid_stat_cpu_usage(
-                                        pid,
-                                        elapsed_seconds,
-                                        &mut cpu_proc_stat_cache,
-                                    )
-                                    .await;
+                            while let Some(res) = set.join_next().await {
+                                if let Ok(Ok((pid, Ok(stat), Ok(status), Ok(cmd)))) = res {
+                                    let mut statm_result =
+                                        parse_proc_pid_status(status, mem_info.total_memory);
 
                                     if statm_result.vm_size == 0 {
                                         continue;
                                     }
 
-                                    if let Some(cmd) = get_proc_pid_cmd(pid).await {
-                                        let process_info = ProcessInfo {
-                                            command: cmd,
-                                            pid: pid as u64,
-                                            status: statm_result,
-                                        };
+                                    statm_result.cpu_usage = parse_proc_pid_stat_cpu_usage(
+                                        pid,
+                                        stat,
+                                        elapsed_seconds,
+                                        &mut cpu_proc_stat_cache,
+                                    );
 
-                                        proc_stats.push(process_info);
-                                    }
+                                    let process_info = ProcessInfo {
+                                        command: cmd,
+                                        pid: pid as u64,
+                                        status: statm_result,
+                                    };
+
+                                    proc_stats.push(process_info);
                                 }
                             }
 
@@ -495,53 +516,44 @@ fn get_free_and_total_memory() -> (u64, u64) {
     return (0, 0);
 }
 
-async fn get_proc_pid_stat_cpu_usage(
+fn parse_proc_pid_stat_cpu_usage(
     pid_id: i32,
+    input: String,
     elapsed_seconds: f32,
     cpu_proc_stat_cache: &mut HashMap<i32, ProcessCpuTime>,
 ) -> f32 {
-    let mut contents_2 = Vec::new();
+    let splits: Vec<&str> = input.split_whitespace().collect();
 
-    let stat_path = "/proc/".to_string() + pid_id.to_string().as_str() + "/stat";
+    if let (Some(user_time), Some(system_time)) = { (splits.get(13), splits.get(14)) } {
+        if let (Ok(parsed_user_time), Ok(parsed_system_time)) =
+            { (user_time.parse::<u64>(), system_time.parse::<u64>()) }
+        {
+            if let Some(entry) = cpu_proc_stat_cache.get(&pid_id) {
+                let nb_processors = 8;
 
-    if let Ok(file) = tokio::fs::File::open(stat_path).await.as_mut() {
-        let _ = file.read_to_end(&mut contents_2).await;
+                let delta_user = parsed_user_time.saturating_sub(entry.user_time);
+                let delta_system = parsed_system_time.saturating_sub(entry.system_time);
 
-        let output = String::from_utf8(contents_2).unwrap();
+                let ticks = (delta_user + delta_system) as f32;
 
-        let splits: Vec<&str> = output.split_whitespace().collect();
+                let cpu_usage = (ticks * nb_processors as f32) / (100.0 * elapsed_seconds);
 
-        if let (Some(user_time), Some(system_time)) = { (splits.get(13), splits.get(14)) } {
-            if let (Ok(parsed_user_time), Ok(parsed_system_time)) =
-                { (user_time.parse::<u64>(), system_time.parse::<u64>()) }
-            {
-                if let Some(entry) = cpu_proc_stat_cache.get(&pid_id) {
-                    let nb_processors = 8;
-
-                    let delta_user = parsed_user_time.saturating_sub(entry.user_time);
-                    let delta_system = parsed_system_time.saturating_sub(entry.system_time);
-
-                    let ticks = (delta_user + delta_system) as f32;
-
-                    let cpu_usage = (ticks * nb_processors as f32) / (100.0 * elapsed_seconds);
-
-                    let _ = cpu_proc_stat_cache.insert(
-                        pid_id,
-                        ProcessCpuTime {
-                            user_time: parsed_user_time,
-                            system_time: parsed_system_time,
-                        },
-                    );
-                    return cpu_usage;
-                } else {
-                    cpu_proc_stat_cache.insert(
-                        pid_id,
-                        ProcessCpuTime {
-                            user_time: parsed_user_time,
-                            system_time: parsed_system_time,
-                        },
-                    );
-                }
+                let _ = cpu_proc_stat_cache.insert(
+                    pid_id,
+                    ProcessCpuTime {
+                        user_time: parsed_user_time,
+                        system_time: parsed_system_time,
+                    },
+                );
+                return cpu_usage;
+            } else {
+                cpu_proc_stat_cache.insert(
+                    pid_id,
+                    ProcessCpuTime {
+                        user_time: parsed_user_time,
+                        system_time: parsed_system_time,
+                    },
+                );
             }
         }
     }
@@ -549,55 +561,30 @@ async fn get_proc_pid_stat_cpu_usage(
     return 0.0;
 }
 
-async fn get_proc_pid_cmd(pid_id: i32) -> Option<String> {
-    let proc_pid_cmd_path = "/proc/".to_string() + pid_id.to_string().as_str() + "/cmdline";
-
-    let mut contents = Vec::new();
-
-    if let Ok(file) = tokio::fs::File::open(proc_pid_cmd_path).await.as_mut() {
-        let _ = file.read_to_end(&mut contents).await;
-
-        return String::from_utf8(contents).ok();
-    }
-
-    return None;
-}
-
-async fn get_proc_pid_status(pid_id: i32, total_memory: u64) -> ProcessStatus {
+fn parse_proc_pid_status(input: String, total_memory: u64) -> ProcessStatus {
     let mut statm_result = ProcessStatus::default();
 
-    let status_path = "/proc/".to_string() + pid_id.to_string().as_str() + "/status";
-
-    let mut contents = Vec::new();
-
-    if let Ok(file) = tokio::fs::File::open(status_path).await.as_mut() {
-        let _ = file.read_to_end(&mut contents).await;
-
-        let output = String::from_utf8(contents).unwrap();
-
-        for line in output.lines() {
-            if let Some(matching) = line.strip_prefix("VmSize:") {
-                if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
-                    if let Ok(parsed) = digit_part.parse::<u64>() {
-                        statm_result.vm_size = parsed;
-                    }
+    for line in input.lines() {
+        if let Some(matching) = line.strip_prefix("VmSize:") {
+            if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
+                if let Ok(parsed) = digit_part.parse::<u64>() {
+                    statm_result.vm_size = parsed;
                 }
-            } else if let Some(matching) = line.strip_prefix("VmRSS:") {
-                if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
-                    if let Ok(parsed) = digit_part.parse::<u64>() {
-                        statm_result.vm_rss = parsed;
-                        statm_result.rss_proc =
-                            (parsed * 1024) as f32 / (total_memory as f32) * 100.0;
-                    }
-                }
-            } else if let Some(matching) = line.strip_prefix("RssShmem:") {
-                if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
-                    if let Ok(parsed) = digit_part.parse::<u64>() {
-                        statm_result.rss_shem = parsed;
-                    }
-                }
-                break;
             }
+        } else if let Some(matching) = line.strip_prefix("VmRSS:") {
+            if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
+                if let Ok(parsed) = digit_part.parse::<u64>() {
+                    statm_result.vm_rss = parsed;
+                    statm_result.rss_proc = (parsed * 1024) as f32 / (total_memory as f32) * 100.0; // is it in kb?
+                }
+            }
+        } else if let Some(matching) = line.strip_prefix("RssShmem:") {
+            if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
+                if let Ok(parsed) = digit_part.parse::<u64>() {
+                    statm_result.rss_shem = parsed;
+                }
+            }
+            break;
         }
     }
 
