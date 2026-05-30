@@ -5,7 +5,7 @@ use crate::parser::{
     get_free_and_total_memory, get_proc_stat_data, parse_proc_pid_stat_cpu_usage,
     parse_proc_pid_status,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs; // for read_dir
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;

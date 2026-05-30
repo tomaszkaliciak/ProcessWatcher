@@ -1,5 +1,5 @@
 use crate::models::{CpuUsageState, ProcessCpuTime, ProcessStatus};
-use libc;
+
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
 use tokio::io::AsyncReadExt;

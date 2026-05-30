@@ -274,7 +274,7 @@ impl App {
                     }
                 }
 
-                for (cell, history) in cells.zip(cpu_history) {
+                for (cell, history) in cells.clone().zip(cpu_history) {
                     let dataset = Dataset::default()
                         .name(history.0.as_str())
                         .marker(Marker::Braille)
@@ -294,6 +294,43 @@ impl App {
 
                     let chart = Chart::new(vec![dataset]).x_axis(x_axis).y_axis(y_axis);
                     frame.render_widget(chart, cell);
+                }
+
+                if let Some(last_cell) = &cells.last() {
+                    let mut mem_usage_history: Vec<(f64, f64)> = self
+                        .cpu_history
+                        .history
+                        .buf
+                        .iter()
+                        .enumerate()
+                        .map(|(x, y)| {
+                            (
+                                x as f64,
+                                100.0 * (y.total_memory - y.free_memory) as f64
+                                    / (y.total_memory as f64),
+                            )
+                        })
+                        .collect();
+
+                    let dataset = Dataset::default()
+                        .name("Used memory")
+                        .marker(Marker::Braille)
+                        .graph_type(GraphType::Line)
+                        .style(Color::Blue)
+                        .data(&mem_usage_history);
+
+                    let x_axis = Axis::default()
+                        .title("Time (s)".blue())
+                        .bounds([0.0, 200.0])
+                        .labels(["0", "200", "400"]);
+
+                    let y_axis = Axis::default()
+                        .title(("Memory used").blue())
+                        .bounds([0.0, 100.0])
+                        .labels(["0", "50", "100%"]);
+
+                    let chart = Chart::new(vec![dataset]).x_axis(x_axis).y_axis(y_axis);
+                    frame.render_widget(chart, *last_cell);
                 }
             }
             CurrentScreen::Watch => {
