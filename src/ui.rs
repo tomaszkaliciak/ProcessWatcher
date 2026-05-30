@@ -1,15 +1,16 @@
-use crate::models::{ProcessHistory, ProcessInfo, ProcessStatus, RingBuffer};
+use crate::models::{MemCpuHistory, ProcessHistory, ProcessInfo, RingBuffer};
 use crate::monitor::InfoReceiver;
 use crossterm::event::{self, KeyCode};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Color;
-use ratatui::symbols;
+use ratatui::symbols::{self, Marker};
+use ratatui::widgets::{Axis, Chart, GraphType};
 use ratatui::{
     DefaultTerminal, Frame,
     style::{Modifier, Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Gauge, List, ListItem, Paragraph, Row, Table, TableState},
+    widgets::{Block, Dataset, Gauge, List, ListItem, Paragraph, Row, Table, TableState},
 };
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -56,7 +57,17 @@ pub struct App {
     proc_info: Vec<ProcessInfo>,
     table_order_settings: TableOrderSettings,
     watched_pid: Option<ProcessHistory>,
+    cpu_history: MemCpuHistory,
+    current_screen: CurrentScreen,
     exit: bool,
+}
+
+#[derive(Debug, Default)]
+pub enum CurrentScreen {
+    #[default]
+    Main,
+    Plots,
+    Watch,
 }
 
 impl App {
@@ -67,18 +78,24 @@ impl App {
         table_state.select_first();
         table_state.select_first_column();
 
+        self.cpu_history = MemCpuHistory {
+            history: RingBuffer::new(200),
+        };
+
         while !self.exit {
             terminal.draw(|frame| self.draw(frame, &mut table_state))?;
 
             self.handle_events(&mut table_state);
 
             while let Ok(result) = info_receiver.reciver.try_recv() {
-                self.freeram = result.free_memory;
-                self.totalram = result.total_memory;
+                self.freeram = result.mem_cpu_stats.free_memory;
+                self.totalram = result.mem_cpu_stats.total_memory;
                 self.proc_info = result.process_stats;
-                self.cpu_usage = result.cpu_usage;
+                self.cpu_usage = result.mem_cpu_stats.cpu_usage.clone();
 
                 self.sort();
+
+                self.cpu_history.history.push(result.mem_cpu_stats);
 
                 if let Some(currently_observered_pid) = &mut self.watched_pid {
                     if let Some(intresting_pid) = self
@@ -119,8 +136,14 @@ impl App {
     fn draw(&self, frame: &mut Frame, table_state: &mut TableState) {
         let title = Line::from(" Process Watcher ".bold());
         let instructions = Line::from(vec![
-            " Update ".into(),
-            "<u>".blue().bold(),
+            " CPU usage plots ".into(),
+            "<p>".blue().bold(),
+            " Watched process stats ".into(),
+            "<l>".blue().bold(),
+            " Start watching process".into(),
+            "<w>".blue().bold(),
+            " Go to main screen ".into(),
+            "<m>".blue().bold(),
             " Quit ".into(),
             "<Q> ".blue().bold(),
         ]);
@@ -151,94 +174,173 @@ impl App {
 
         frame.render_widget(paragraph, chunks[0]);
 
-        let header = Row::new(["PID", "VIRT", "RSS", "SHR", "MEM(%)", "CPU(%)", "cmd"])
-            .style(Style::new().bold())
-            .bottom_margin(1);
+        match self.current_screen {
+            CurrentScreen::Main => {
+                let header = Row::new(["PID", "VIRT", "RSS", "SHR", "MEM(%)", "CPU(%)", "cmd"])
+                    .style(Style::new().bold())
+                    .bottom_margin(1);
 
-        let mut rows: Vec<Row> = Vec::new();
+                let mut rows: Vec<Row> = Vec::new();
 
-        for proc_info in &self.proc_info {
-            rows.push(Row::new([
-                proc_info.pid.to_string(),
-                proc_info.status.vm_size.to_string(),
-                proc_info.status.vm_rss.to_string(),
-                proc_info.status.rss_shem.to_string(),
-                proc_info.status.rss_proc.to_string(),
-                format!("{:>2.4}", proc_info.status.cpu_usage.to_string()),
-                proc_info.command.clone(),
-            ]));
-        }
+                for proc_info in &self.proc_info {
+                    rows.push(Row::new([
+                        proc_info.pid.to_string(),
+                        proc_info.status.vm_size.to_string(),
+                        proc_info.status.vm_rss.to_string(),
+                        proc_info.status.rss_shem.to_string(),
+                        proc_info.status.rss_proc.to_string(),
+                        format!("{:>2.4}", proc_info.status.cpu_usage.to_string()),
+                        proc_info.command.clone(),
+                    ]));
+                }
 
-        let items: Vec<ListItem> = self
-            .cpu_usage
-            .keys()
-            .map(|key| {
-                ListItem::new(Line::from(vec![
-                    Span::raw(symbols::DOT),
-                    Span::styled(
-                        format!("{}", key),
-                        Style::default()
-                            .fg(Color::LightGreen)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]))
-            })
-            .collect();
+                let items: Vec<ListItem> = self
+                    .cpu_usage
+                    .keys()
+                    .map(|key| {
+                        ListItem::new(Line::from(vec![
+                            Span::raw(symbols::DOT),
+                            Span::styled(
+                                format!("{}", key),
+                                Style::default()
+                                    .fg(Color::LightGreen)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]))
+                    })
+                    .collect();
 
-        let list = List::new(items);
-        frame.render_widget(list, chunks[2]);
+                let list = List::new(items);
+                frame.render_widget(list, chunks[2]);
 
-        let chunk = chunks[2];
-        let max_rows = chunk.height as usize;
+                let chunk = chunks[2];
+                let max_rows = chunk.height as usize;
 
-        for (i, (_, usage)) in self.cpu_usage.iter().take(max_rows).enumerate() {
-            let y = chunk.top() + i as u16;
+                for (i, (_, usage)) in self.cpu_usage.iter().take(max_rows).enumerate() {
+                    let y = chunk.top() + i as u16;
 
-            let gauge = Gauge::default()
-                .gauge_style(Style::default().fg(Color::Yellow))
-                .ratio((usage / 100.0) as f64);
+                    let gauge = Gauge::default()
+                        .gauge_style(Style::default().fg(Color::Yellow))
+                        .ratio((usage / 100.0) as f64);
 
-            frame.render_widget(
-                gauge,
-                Rect {
-                    x: chunk.left() + 10,
-                    y,
-                    width: chunk.width.saturating_sub(10),
-                    height: 1,
-                },
-            );
-        }
+                    frame.render_widget(
+                        gauge,
+                        Rect {
+                            x: chunk.left() + 10,
+                            y,
+                            width: chunk.width.saturating_sub(10),
+                            height: 1,
+                        },
+                    );
+                }
 
-        let widths = [
-            Constraint::Max(6),
-            Constraint::Max(12),
-            Constraint::Max(12),
-            Constraint::Max(10),
-            Constraint::Max(10),
-            Constraint::Max(10),
-            Constraint::Min(30),
-        ];
-        let table = Table::new(rows, widths)
-            .header(header)
-            .column_spacing(1)
-            .style(Color::White)
-            .row_highlight_style(Style::new().on_black().bold())
-            .column_highlight_style(Color::Gray)
-            .cell_highlight_style(Style::new().reversed().yellow())
-            .highlight_symbol("() ");
+                let widths = [
+                    Constraint::Max(6),
+                    Constraint::Max(12),
+                    Constraint::Max(12),
+                    Constraint::Max(10),
+                    Constraint::Max(10),
+                    Constraint::Max(10),
+                    Constraint::Min(30),
+                ];
+                let table = Table::new(rows, widths)
+                    .header(header)
+                    .column_spacing(1)
+                    .style(Color::White)
+                    .row_highlight_style(Style::new().on_black().bold())
+                    .column_highlight_style(Color::Gray)
+                    .cell_highlight_style(Style::new().reversed().yellow())
+                    .highlight_symbol("() ");
 
-        frame.render_stateful_widget(table, chunks[1], table_state);
+                frame.render_stateful_widget(table, chunks[1], table_state);
+            }
+            CurrentScreen::Plots => {
+                let col_constraints = (0..2).map(|_| Constraint::Min(9));
+                let row_constraints = (0..5).map(|_| Constraint::Min(9));
+                let horizontal = Layout::horizontal(col_constraints).spacing(1);
+                let vertical = Layout::vertical(row_constraints).spacing(1);
 
-        if let Some(observed_pid) = &self.watched_pid {
-            if !observed_pid.history.buf.is_empty() {
-                let text = Text::from(
-                    observed_pid.pid.to_string()
-                        + ", Samples:"
-                        + observed_pid.history.buf.iter().len().to_string().as_str(),
-                );
+                let rows = vertical.split(chunks[1]);
+                let cells = rows.iter().flat_map(|&row| horizontal.split(row).to_vec());
 
-                let paragraph_2 = Paragraph::new(text).centered();
-                frame.render_widget(paragraph_2, chunks[3]);
+                let mut cpu_history: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+
+                for (id, elem) in self.cpu_history.history.buf.iter().enumerate() {
+                    for elem2 in elem.cpu_usage.iter() {
+                        cpu_history
+                            .entry(elem2.0.clone())
+                            .or_default()
+                            .push((id as f64, *elem2.1 as f64));
+                    }
+                }
+
+                for (cell, history) in cells.zip(cpu_history) {
+                    let dataset = Dataset::default()
+                        .name(history.0.as_str())
+                        .marker(Marker::Braille)
+                        .graph_type(GraphType::Line)
+                        .style(Color::Blue)
+                        .data(history.1.as_slice());
+
+                    let x_axis = Axis::default()
+                        .title("Time (s)".blue())
+                        .bounds([0.0, 200.0])
+                        .labels(["0", "200", "400"]);
+
+                    let y_axis = Axis::default()
+                        .title((history.0.clone() + " usage").blue())
+                        .bounds([0.0, 100.0])
+                        .labels(["0", "50", "100%"]);
+
+                    let chart = Chart::new(vec![dataset]).x_axis(x_axis).y_axis(y_axis);
+                    frame.render_widget(chart, cell);
+                }
+            }
+            CurrentScreen::Watch => {
+                if let Some(observed_pid) = &self.watched_pid {
+                    let data: Vec<(u64, u64, u64, f32, f32)> = observed_pid
+                        .history
+                        .buf
+                        .iter()
+                        .map(|x| (x.vm_size, x.vm_rss, x.rss_shem, x.rss_proc, x.cpu_usage))
+                        .collect();
+
+                    let header =
+                        Row::new(["VM_SIZE", "VM_RSS", "RSS_SHEM", "RSS_PROC", "CPU USAGE"])
+                            .style(Style::new().bold())
+                            .bottom_margin(1);
+
+                    let mut rows: Vec<Row> = Vec::new();
+
+                    for entry in &data {
+                        rows.push(Row::new([
+                            entry.0.to_string(),
+                            entry.1.to_string(),
+                            entry.2.to_string(),
+                            entry.3.to_string(),
+                            entry.4.to_string(),
+                        ]));
+                    }
+
+                    let widths = [
+                        Constraint::Max(12),
+                        Constraint::Max(12),
+                        Constraint::Max(12),
+                        Constraint::Max(10),
+                        Constraint::Max(10),
+                    ];
+
+                    let table = Table::new(rows, widths)
+                        .header(header)
+                        .column_spacing(1)
+                        .style(Color::White)
+                        .row_highlight_style(Style::new().on_black().bold())
+                        .column_highlight_style(Color::Gray)
+                        .cell_highlight_style(Style::new().reversed().yellow())
+                        .highlight_symbol("() ");
+
+                    frame.render_widget(table, chunks[1]);
+                }
             }
         }
     }
@@ -253,6 +355,15 @@ impl App {
                         KeyCode::Up => table_state.select_previous(),
                         KeyCode::Right => table_state.select_next_column(),
                         KeyCode::Left => table_state.select_previous_column(),
+                        KeyCode::Char('l') => {
+                            self.current_screen = CurrentScreen::Watch;
+                        }
+                        KeyCode::Char('m') => {
+                            self.current_screen = CurrentScreen::Main;
+                        }
+                        KeyCode::Char('p') => {
+                            self.current_screen = CurrentScreen::Plots;
+                        }
                         KeyCode::Char('s') => {
                             if let Some(idx) = table_state.selected_column() {
                                 if let Some(col) = UI_COLUMNS.get(idx) {

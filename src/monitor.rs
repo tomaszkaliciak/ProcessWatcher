@@ -38,8 +38,10 @@ impl InfoReceiver {
 
                             let mut mem_info: MemInfo = MemInfo::default();
 
-                            (mem_info.free_memory, mem_info.total_memory) =
-                                get_free_and_total_memory();
+                            (
+                                mem_info.mem_cpu_stats.free_memory,
+                                mem_info.mem_cpu_stats.total_memory,
+                            ) = get_free_and_total_memory();
 
                             let mut proc_stats = Vec::new();
 
@@ -80,8 +82,10 @@ impl InfoReceiver {
 
                             while let Some(res) = set.join_next().await {
                                 if let Ok(Ok((pid, Ok(stat), Ok(status), Ok(cmd)))) = res {
-                                    let mut statm_result =
-                                        parse_proc_pid_status(status, mem_info.total_memory);
+                                    let mut statm_result = parse_proc_pid_status(
+                                        status,
+                                        mem_info.mem_cpu_stats.total_memory,
+                                    );
 
                                     if statm_result.vm_size == 0 {
                                         continue;
@@ -104,7 +108,8 @@ impl InfoReceiver {
                                 }
                             }
 
-                            mem_info.cpu_usage = get_proc_stat_data(&mut cpu_usage_state).await;
+                            mem_info.mem_cpu_stats.cpu_usage =
+                                get_proc_stat_data(&mut cpu_usage_state).await;
 
                             mem_info.process_stats = proc_stats;
                             send.send(mem_info).await.unwrap();

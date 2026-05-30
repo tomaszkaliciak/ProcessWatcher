@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub struct RingBuffer<T> {
     pub buf: VecDeque<T>,
     pub capacity: usize,
@@ -28,27 +28,22 @@ pub struct ProcessHistory {
     pub history: RingBuffer<ProcessStatus>,
 }
 
-#[derive(Debug, Default)]
-pub struct MemInfo {
+#[derive(Debug, PartialEq, Default)]
+pub struct MemCpuHistory {
+    pub history: RingBuffer<MemCpuInfo>,
+}
+
+#[derive(Debug, PartialEq, Default)]
+pub struct MemCpuInfo {
     pub total_memory: u64,
     pub free_memory: u64,
     pub cpu_usage: std::collections::BTreeMap<String, f32>,
-    pub process_stats: Vec<ProcessInfo>,
 }
 
-impl MemInfo {
-    pub fn send(
-        state: (u64, u64),
-        cpu_usage: std::collections::BTreeMap<String, f32>,
-        proc_stats: Vec<ProcessInfo>,
-    ) -> MemInfo {
-        MemInfo {
-            total_memory: state.0,
-            free_memory: state.1,
-            cpu_usage,
-            process_stats: proc_stats,
-        }
-    }
+#[derive(Debug, Default)]
+pub struct MemInfo {
+    pub mem_cpu_stats: MemCpuInfo,
+    pub process_stats: Vec<ProcessInfo>,
 }
 
 #[derive(Debug, Default, Clone)]
