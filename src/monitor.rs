@@ -2,11 +2,11 @@ use crate::models::{CpuUsageState, MemInfo, ProcessCpuTime, ProcessInfo};
 use tokio::task::JoinSet;
 
 use crate::parser::{
-    get_free_and_total_memory, get_proc_stat_data, parse_proc_pid_stat_cpu_usage,
+    get_free_available_total_memory, get_proc_stat_data, parse_proc_pid_stat_cpu_usage,
     parse_proc_pid_status,
 };
 use std::collections::HashMap;
-use std::fs; // for read_dir
+use std::fs;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
@@ -38,10 +38,14 @@ impl InfoReceiver {
 
                             let mut mem_info: MemInfo = MemInfo::default();
 
+                            let meminfo_output =
+                                tokio::fs::read_to_string("/proc/meminfo").await.unwrap();
+
                             (
                                 mem_info.mem_cpu_stats.free_memory,
+                                mem_info.mem_cpu_stats.available_memory,
                                 mem_info.mem_cpu_stats.total_memory,
-                            ) = get_free_and_total_memory();
+                            ) = get_free_available_total_memory(meminfo_output);
 
                             let mut proc_stats = Vec::new();
 

@@ -36,6 +36,7 @@ pub struct MemCpuHistory {
 #[derive(Debug, PartialEq, Default)]
 pub struct MemCpuInfo {
     pub total_memory: u64,
+    pub available_memory: u64,
     pub free_memory: u64,
     pub cpu_usage: std::collections::BTreeMap<String, f32>,
 }

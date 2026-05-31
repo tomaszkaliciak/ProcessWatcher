@@ -52,6 +52,7 @@ struct TableOrderSettings {
 #[derive(Debug, Default)]
 pub struct App {
     totalram: u64,
+    availableram: u64,
     freeram: u64,
     cpu_usage: BTreeMap<String, f32>,
     proc_info: Vec<ProcessInfo>,
@@ -89,6 +90,7 @@ impl App {
 
             while let Ok(result) = info_receiver.reciver.try_recv() {
                 self.freeram = result.mem_cpu_stats.free_memory;
+                self.availableram = result.mem_cpu_stats.available_memory;
                 self.totalram = result.mem_cpu_stats.total_memory;
                 self.proc_info = result.process_stats;
                 self.cpu_usage = result.mem_cpu_stats.cpu_usage.clone();
@@ -134,13 +136,13 @@ impl App {
         let title = Line::from(" Process Watcher ".bold());
         let instructions = Line::from(vec![
             " CPU usage plots ".into(),
-            "<p>".blue().bold(),
+            "<p>,".blue().bold(),
             " Watched process stats ".into(),
-            "<l>".blue().bold(),
+            "<l>,".blue().bold(),
             " Start watching process".into(),
-            "<w>".blue().bold(),
+            "<w>,".blue().bold(),
             " Go to main screen ".into(),
-            "<m>".blue().bold(),
+            "<m>,".blue().bold(),
             " Quit ".into(),
             "<Q> ".blue().bold(),
         ]);
@@ -149,11 +151,21 @@ impl App {
             .title_bottom(instructions.centered())
             .border_set(border::THICK);
 
+        let total_memory_gb = self.totalram as f32 / (1024.0 * 1024.0);
+        let available_memory_gb = self.availableram as f32 / (1024.0 * 1024.0);
+        let free_memory_gb = self.freeram as f32 / (1024.0 * 1024.0);
+
+        let mem_usage = 100.0 * (1.0 - (self.availableram as f32 / self.totalram as f32));
+
         let counter_text = Text::from(vec![Line::from(vec![
-            "Total memory (KB): ".into(),
-            self.totalram.to_string().yellow(),
-            " Free memory (KB): ".into(),
-            self.freeram.to_string().green(),
+            "Free memory (GB): ".into(),
+            free_memory_gb.to_string().green(),
+            ", Available memory (GB): ".into(),
+            available_memory_gb.to_string().green(),
+            ", Memory usage [%]: ".into(),
+            mem_usage.to_string().green(),
+            ", Total memory (GB): ".into(),
+            total_memory_gb.to_string().yellow(),
         ])]);
 
         let chunks = Layout::default()
@@ -397,6 +409,23 @@ impl App {
         self.sort();
     }
 
+    fn on_watch_pid_event(&mut self, table_state: &mut TableState) {
+        if let Some(idx) = table_state.selected_cell()
+            && let Some(selected_process) = self.proc_info.get(idx.0)
+        {
+            if let Some(currently_observered_pid) = &self.watched_pid
+                && currently_observered_pid.pid == selected_process.pid
+            {
+                return;
+            }
+
+            self.watched_pid = Some(ProcessHistory {
+                pid: selected_process.pid,
+                history: RingBuffer::new(200),
+            });
+        }
+    }
+
     fn handle_events(&mut self, table_state: &mut TableState) {
         if let Ok(true) = event::poll(Duration::from_millis(100))
             && let Ok(event::Event::Key(key)) = event::read()
@@ -420,20 +449,7 @@ impl App {
                     self.on_sort_requested_event(table_state);
                 }
                 KeyCode::Char('w') => {
-                    if let Some(idx) = table_state.selected_cell()
-                        && let Some(selected_process) = self.proc_info.get(idx.0)
-                    {
-                        if let Some(currently_observered_pid) = &self.watched_pid
-                            && currently_observered_pid.pid == selected_process.pid
-                        {
-                            return;
-                        }
-
-                        self.watched_pid = Some(ProcessHistory {
-                            pid: selected_process.pid,
-                            history: RingBuffer::new(200),
-                        });
-                    }
+                    self.on_watch_pid_event(table_state);
                 }
                 _ => {}
             }

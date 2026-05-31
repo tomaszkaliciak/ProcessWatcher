@@ -1,19 +1,28 @@
 use crate::models::{CpuUsageState, ProcessCpuTime, ProcessStatus};
 
 use std::collections::{BTreeMap, HashMap};
-use std::mem;
 use tokio::io::AsyncReadExt;
 
-pub fn get_free_and_total_memory() -> (u64, u64) {
-    unsafe {
-        let mut info: libc::sysinfo = mem::zeroed();
-        if libc::sysinfo(&mut info) == 0 {
-            return (info.freeram, info.totalram);
-        } else {
-            eprintln!("Failed to get system info.");
+pub fn get_free_available_total_memory(input: String) -> (u64, u64, u64) {
+    let mut mem_total = 0u64;
+    let mut mem_free = 0u64;
+    let mut mem_available = 0u64;
+
+    for line in input.lines() {
+        let val = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        match line.split(':').next().unwrap() {
+            "MemTotal" => mem_total = val,
+            "MemFree" => mem_free = val,
+            "MemAvailable" => mem_available = val,
+            _ => {}
         }
     }
-    (0, 0)
+
+    (mem_free, mem_available, mem_total)
 }
 
 pub fn parse_proc_pid_status(status_str: String, total_memory: u64) -> ProcessStatus {
