@@ -297,7 +297,14 @@ impl App {
                         .labels(["0", "200", "400"]);
 
                     let y_axis = Axis::default()
-                        .title((history.0.clone() + " usage").blue())
+                        .title(
+                            format!(
+                                " {} usage: ({:>2.4})%",
+                                history.0,
+                                history.1.first().unwrap().1.to_string().as_str()
+                            )
+                            .blue(),
+                        )
                         .bounds([0.0, 100.0])
                         .labels(["0", "50", "100%"]);
 
@@ -315,14 +322,14 @@ impl App {
                         .map(|(x, y)| {
                             (
                                 x as f64,
-                                100.0 * (y.total_memory - y.free_memory) as f64
+                                100.0 * (y.total_memory - y.available_memory) as f64
                                     / (y.total_memory as f64),
                             )
                         })
                         .collect();
 
                     let dataset = Dataset::default()
-                        .name("Used memory")
+                        .name(format!("Used memory: ({:>2.4})%", mem_usage))
                         .marker(Marker::Braille)
                         .graph_type(GraphType::Line)
                         .style(Color::Blue)
@@ -334,7 +341,7 @@ impl App {
                         .labels(["0", "200", "400"]);
 
                     let y_axis = Axis::default()
-                        .title(("Memory used").blue())
+                        .title(format!("Used memory: ({:>2.4})%", mem_usage).blue())
                         .bounds([0.0, 100.0])
                         .labels(["0", "50", "100%"]);
 
