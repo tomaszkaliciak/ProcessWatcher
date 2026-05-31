@@ -38,7 +38,7 @@ pub fn parse_proc_pid_status(status_str: String, total_memory: u64) -> ProcessSt
             && let Ok(parsed) = digit_part.parse::<u64>()
         {
             statm_result.vm_rss = parsed;
-            statm_result.rss_proc = (parsed * 1024) as f32 / (total_memory as f32) * 100.0;
+            statm_result.rss_proc = (parsed * 1024) as f32 / (1024.0 * total_memory as f32) * 100.0;
         } else if let Some(matching) = line.strip_prefix("RssShmem:")
             && let Some(digit_part) = matching.split_whitespace().next()
             && let Ok(parsed) = digit_part.parse::<u64>()

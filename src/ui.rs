@@ -197,7 +197,7 @@ impl App {
                         proc_info.status.vm_size.to_string(),
                         proc_info.status.vm_rss.to_string(),
                         proc_info.status.rss_shem.to_string(),
-                        proc_info.status.rss_proc.to_string(),
+                        format!("{:>2.4}", proc_info.status.rss_proc.to_string()),
                         format!("{:>2.4}", proc_info.status.cpu_usage.to_string()),
                         proc_info.command.clone(),
                     ]));
