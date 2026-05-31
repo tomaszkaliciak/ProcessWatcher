@@ -19,25 +19,22 @@ pub fn get_free_and_total_memory() -> (u64, u64) {
 pub fn parse_proc_pid_status(status_str: String, total_memory: u64) -> ProcessStatus {
     let mut statm_result = ProcessStatus::default();
     for line in status_str.lines() {
-        if let Some(matching) = line.strip_prefix("VmSize:") {
-            if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
-                if let Ok(parsed) = digit_part.parse::<u64>() {
-                    statm_result.vm_size = parsed;
-                }
-            }
-        } else if let Some(matching) = line.strip_prefix("VmRSS:") {
-            if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
-                if let Ok(parsed) = digit_part.parse::<u64>() {
-                    statm_result.vm_rss = parsed;
-                    statm_result.rss_proc = (parsed * 1024) as f32 / (total_memory as f32) * 100.0;
-                }
-            }
-        } else if let Some(matching) = line.strip_prefix("RssShmem:") {
-            if let Some(digit_part) = matching.trim_start().split_whitespace().next() {
-                if let Ok(parsed) = digit_part.parse::<u64>() {
-                    statm_result.rss_shem = parsed;
-                }
-            }
+        if let Some(matching) = line.strip_prefix("VmSize:")
+            && let Some(digit_part) = matching.split_whitespace().next()
+            && let Ok(parsed) = digit_part.parse::<u64>()
+        {
+            statm_result.vm_size = parsed;
+        } else if let Some(matching) = line.strip_prefix("VmRSS:")
+            && let Some(digit_part) = matching.split_whitespace().next()
+            && let Ok(parsed) = digit_part.parse::<u64>()
+        {
+            statm_result.vm_rss = parsed;
+            statm_result.rss_proc = (parsed * 1024) as f32 / (total_memory as f32) * 100.0;
+        } else if let Some(matching) = line.strip_prefix("RssShmem:")
+            && let Some(digit_part) = matching.split_whitespace().next()
+            && let Ok(parsed) = digit_part.parse::<u64>()
+        {
+            statm_result.rss_shem = parsed;
             break;
         }
     }
@@ -52,41 +49,40 @@ pub fn parse_proc_pid_stat_cpu_usage(
 ) -> f32 {
     let splits: Vec<&str> = input.split_whitespace().collect();
 
-    if let (Some(user_time), Some(system_time)) = { (splits.get(13), splits.get(14)) } {
-        if let (Ok(parsed_user_time), Ok(parsed_system_time)) =
+    if let (Some(user_time), Some(system_time)) = { (splits.get(13), splits.get(14)) }
+        && let (Ok(parsed_user_time), Ok(parsed_system_time)) =
             { (user_time.parse::<u64>(), system_time.parse::<u64>()) }
-        {
-            if let Some(entry) = cpu_proc_stat_cache.get(&pid_id) {
-                let nb_processors = 8;
+    {
+        if let Some(entry) = cpu_proc_stat_cache.get(&pid_id) {
+            let nb_processors = 8;
 
-                let delta_user = parsed_user_time.saturating_sub(entry.user_time);
-                let delta_system = parsed_system_time.saturating_sub(entry.system_time);
+            let delta_user = parsed_user_time.saturating_sub(entry.user_time);
+            let delta_system = parsed_system_time.saturating_sub(entry.system_time);
 
-                let ticks = (delta_user + delta_system) as f32;
+            let ticks = (delta_user + delta_system) as f32;
 
-                let cpu_usage = (ticks * nb_processors as f32) / (100.0 * elapsed_seconds);
+            let cpu_usage = (ticks * nb_processors as f32) / (100.0 * elapsed_seconds);
 
-                let _ = cpu_proc_stat_cache.insert(
-                    pid_id,
-                    ProcessCpuTime {
-                        user_time: parsed_user_time,
-                        system_time: parsed_system_time,
-                    },
-                );
-                return cpu_usage;
-            } else {
-                cpu_proc_stat_cache.insert(
-                    pid_id,
-                    ProcessCpuTime {
-                        user_time: parsed_user_time,
-                        system_time: parsed_system_time,
-                    },
-                );
-            }
+            let _ = cpu_proc_stat_cache.insert(
+                pid_id,
+                ProcessCpuTime {
+                    user_time: parsed_user_time,
+                    system_time: parsed_system_time,
+                },
+            );
+            return cpu_usage;
+        } else {
+            cpu_proc_stat_cache.insert(
+                pid_id,
+                ProcessCpuTime {
+                    user_time: parsed_user_time,
+                    system_time: parsed_system_time,
+                },
+            );
         }
     }
 
-    return 0.0;
+    0.0
 }
 
 pub async fn get_proc_stat_data(
@@ -105,7 +101,7 @@ pub async fn get_proc_stat_data(
                 return output;
             }
 
-            if let Ok(cpu_times) = parse_cpu_times(&line) {
+            if let Ok(cpu_times) = parse_cpu_times(line) {
                 let total_idle_time = cpu_times.idle + cpu_times.iowait;
                 let total_time = cpu_times.user
                     + cpu_times.nice
@@ -137,7 +133,7 @@ pub async fn get_proc_stat_data(
         }
     }
 
-    return output;
+    output
 }
 
 #[derive(Debug, Default)]

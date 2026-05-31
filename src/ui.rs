@@ -97,16 +97,13 @@ impl App {
 
                 self.cpu_history.history.push(result.mem_cpu_stats);
 
-                if let Some(currently_observered_pid) = &mut self.watched_pid {
-                    if let Some(intresting_pid) = self
+                if let Some(currently_observered_pid) = &mut self.watched_pid
+                    && let Some(intresting_pid) = self
                         .proc_info
                         .iter()
                         .find(|x| x.pid == currently_observered_pid.pid)
-                    {
-                        currently_observered_pid
-                            .history
-                            .push(intresting_pid.status.clone());
-                    }
+                {
+                    currently_observered_pid.history.push(intresting_pid.status);
                 }
             }
         }
@@ -201,7 +198,7 @@ impl App {
                         ListItem::new(Line::from(vec![
                             Span::raw(symbols::DOT),
                             Span::styled(
-                                format!("{}", key),
+                                key,
                                 Style::default()
                                     .fg(Color::LightGreen)
                                     .add_modifier(Modifier::BOLD),
@@ -297,7 +294,7 @@ impl App {
                 }
 
                 if let Some(last_cell) = &cells.last() {
-                    let mut mem_usage_history: Vec<(f64, f64)> = self
+                    let mem_usage_history: Vec<(f64, f64)> = self
                         .cpu_history
                         .history
                         .buf
@@ -382,66 +379,64 @@ impl App {
         }
     }
 
+    fn on_sort_requested_event(&mut self, table_state: &mut TableState) {
+        if let Some(idx) = table_state.selected_column()
+            && let Some(col) = UI_COLUMNS.get(idx)
+        {
+            if self.table_order_settings.order_by_field != *col {
+                self.table_order_settings.order_by_field = *col;
+                self.table_order_settings.order = SortOrder::Descending;
+            } else if self.table_order_settings.order == SortOrder::Ascending {
+                self.table_order_settings.order = SortOrder::Descending;
+            } else {
+                self.table_order_settings.order = SortOrder::Ascending;
+            }
+            self.sort();
+            return;
+        }
+        self.sort();
+    }
+
     fn handle_events(&mut self, table_state: &mut TableState) {
-        match event::poll(Duration::from_millis(100)) {
-            Ok(true) => {
-                if let Ok(event::Event::Key(key)) = event::read() {
-                    match key.code {
-                        KeyCode::Char('q') => self.exit(),
-                        KeyCode::Down => table_state.select_next(),
-                        KeyCode::Up => table_state.select_previous(),
-                        KeyCode::Right => table_state.select_next_column(),
-                        KeyCode::Left => table_state.select_previous_column(),
-                        KeyCode::Char('l') => {
-                            self.current_screen = CurrentScreen::Watch;
+        if let Ok(true) = event::poll(Duration::from_millis(100))
+            && let Ok(event::Event::Key(key)) = event::read()
+        {
+            match key.code {
+                KeyCode::Char('q') => self.exit(),
+                KeyCode::Down => table_state.select_next(),
+                KeyCode::Up => table_state.select_previous(),
+                KeyCode::Right => table_state.select_next_column(),
+                KeyCode::Left => table_state.select_previous_column(),
+                KeyCode::Char('l') => {
+                    self.current_screen = CurrentScreen::Watch;
+                }
+                KeyCode::Char('m') => {
+                    self.current_screen = CurrentScreen::Main;
+                }
+                KeyCode::Char('p') => {
+                    self.current_screen = CurrentScreen::Plots;
+                }
+                KeyCode::Char('s') => {
+                    self.on_sort_requested_event(table_state);
+                }
+                KeyCode::Char('w') => {
+                    if let Some(idx) = table_state.selected_cell()
+                        && let Some(selected_process) = self.proc_info.get(idx.0)
+                    {
+                        if let Some(currently_observered_pid) = &self.watched_pid
+                            && currently_observered_pid.pid == selected_process.pid
+                        {
+                            return;
                         }
-                        KeyCode::Char('m') => {
-                            self.current_screen = CurrentScreen::Main;
-                        }
-                        KeyCode::Char('p') => {
-                            self.current_screen = CurrentScreen::Plots;
-                        }
-                        KeyCode::Char('s') => {
-                            if let Some(idx) = table_state.selected_column() {
-                                if let Some(col) = UI_COLUMNS.get(idx) {
-                                    if self.table_order_settings.order_by_field != *col {
-                                        self.table_order_settings.order_by_field = *col;
-                                        self.table_order_settings.order = SortOrder::Descending;
-                                    } else {
-                                        if self.table_order_settings.order == SortOrder::Ascending {
-                                            self.table_order_settings.order = SortOrder::Descending;
-                                        } else {
-                                            self.table_order_settings.order = SortOrder::Ascending;
-                                        }
-                                    }
-                                    self.sort();
-                                    return;
-                                }
-                            }
 
-                            self.sort();
-                        }
-                        KeyCode::Char('w') => {
-                            if let Some(idx) = table_state.selected_cell() {
-                                if let Some(selected_process) = self.proc_info.get(idx.0) {
-                                    if let Some(currently_observered_pid) = &self.watched_pid {
-                                        if currently_observered_pid.pid == selected_process.pid {
-                                            return;
-                                        }
-                                    }
-
-                                    self.watched_pid = Some(ProcessHistory {
-                                        pid: selected_process.pid,
-                                        history: RingBuffer::new(200),
-                                    });
-                                }
-                            }
-                        }
-                        _ => {}
+                        self.watched_pid = Some(ProcessHistory {
+                            pid: selected_process.pid,
+                            history: RingBuffer::new(200),
+                        });
                     }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 
