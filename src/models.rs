@@ -51,6 +51,7 @@ pub struct MemInfo {
 pub struct ProcessInfo {
     pub command: String,
     pub pid: u64,
+    pub parent_pid: Option<u64>,
     pub status: ProcessStatus,
 }
 

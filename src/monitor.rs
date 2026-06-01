@@ -2,8 +2,8 @@ use crate::models::{CpuUsageState, MemInfo, ProcessCpuTime, ProcessInfo};
 use tokio::task::JoinSet;
 
 use crate::parser::{
-    get_free_available_total_memory, get_proc_stat_data, parse_proc_pid_stat_cpu_usage,
-    parse_proc_pid_status,
+    get_free_available_total_memory, get_proc_stat_data, parse_proc_pid_parent,
+    parse_proc_pid_stat_cpu_usage, parse_proc_pid_status,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -86,16 +86,18 @@ impl InfoReceiver {
 
                             while let Some(res) = set.join_next().await {
                                 if let Ok(Ok((pid, Ok(stat), Ok(status), Ok(cmd)))) = res {
-                                    let mut statm_result = parse_proc_pid_status(
+                                    let parent_pid = parse_proc_pid_parent(&status);
+
+                                    let mut status_result = parse_proc_pid_status(
                                         status,
                                         mem_info.mem_cpu_stats.total_memory,
                                     );
 
-                                    if statm_result.vm_size == 0 {
+                                    if status_result.vm_size == 0 {
                                         continue;
                                     }
 
-                                    statm_result.cpu_usage = parse_proc_pid_stat_cpu_usage(
+                                    status_result.cpu_usage = parse_proc_pid_stat_cpu_usage(
                                         pid,
                                         stat,
                                         elapsed_seconds,
@@ -105,7 +107,8 @@ impl InfoReceiver {
                                     let process_info = ProcessInfo {
                                         command: cmd,
                                         pid: pid as u64,
-                                        status: statm_result,
+                                        parent_pid,
+                                        status: status_result,
                                     };
 
                                     proc_stats.push(process_info);

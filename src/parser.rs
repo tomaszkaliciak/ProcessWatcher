@@ -50,6 +50,18 @@ pub fn parse_proc_pid_status(status_str: String, total_memory: u64) -> ProcessSt
     statm_result
 }
 
+pub fn parse_proc_pid_parent(status_str: &str) -> Option<u64> {
+    for line in status_str.lines() {
+        if let Some(matching) = line.strip_prefix("PPid:")
+            && let Some(digit_part) = matching.split_whitespace().next()
+            && let Ok(parsed) = digit_part.parse::<u64>()
+        {
+            return Some(parsed);
+        }
+    }
+    None
+}
+
 pub fn parse_proc_pid_stat_cpu_usage(
     pid_id: i32,
     input: String,
