@@ -1,11 +1,9 @@
 use crate::models::{MemCpuHistory, ProcessHistory, ProcessInfo, RingBuffer};
 use crate::monitor::InfoReceiver;
-use crate::ui::ProcessDisplayKind::Tree;
 use crossterm::event::{self, KeyCode};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::symbols::{self, Marker};
-use ratatui::widgets::RatatuiLogoSize::Small;
 use ratatui::widgets::{Axis, Chart, GraphType};
 use ratatui::{
     DefaultTerminal, Frame,
@@ -14,8 +12,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Dataset, Gauge, List, ListItem, Paragraph, Row, Table, TableState},
 };
-use std::cmp::Ordering::{self, Equal, Greater, Less};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 const UI_COLUMNS: [ProcessUiColumn; 7] = [
     ProcessUiColumn::Pid,
@@ -106,7 +103,7 @@ impl App {
                 self.proc_info = result.process_stats;
                 self.cpu_usage = result.mem_cpu_stats.cpu_usage.clone();
 
-                self.sort();
+                self.sort_display_kind();
 
                 self.cpu_history.history.push(result.mem_cpu_stats);
 
@@ -124,55 +121,90 @@ impl App {
     }
 
     fn sort(&mut self) {
+        match self.table_order_settings.order_by_field {
+            ProcessUiColumn::Command => self.proc_info.sort_by(|a, b| a.command.cmp(&b.command)),
+            ProcessUiColumn::Pid => self.proc_info.sort_by_key(|u| u.pid),
+            ProcessUiColumn::VmSize => self.proc_info.sort_by_key(|u| u.status.vm_size),
+            ProcessUiColumn::VmRss => self.proc_info.sort_by_key(|u| u.status.vm_rss),
+            ProcessUiColumn::RssShem => self.proc_info.sort_by_key(|u| u.status.rss_shem),
+            ProcessUiColumn::RssProc => self
+                .proc_info
+                .sort_by(|u, v| u.status.rss_proc.total_cmp(&v.status.rss_proc)),
+            ProcessUiColumn::CpuUsage => self
+                .proc_info
+                .sort_by(|u, v| u.status.cpu_usage.total_cmp(&v.status.cpu_usage)),
+        }
+
+        if self.table_order_settings.order == SortOrder::Descending {
+            self.proc_info.reverse();
+        }
+    }
+
+    fn sort_display_kind(&mut self) {
         match self.process_display_kind {
             ProcessDisplayKind::List => {
-                match self.table_order_settings.order_by_field {
-                    ProcessUiColumn::Command => {
-                        self.proc_info.sort_by(|a, b| a.command.cmp(&b.command))
-                    }
-                    ProcessUiColumn::Pid => self.proc_info.sort_by_key(|u| u.pid),
-                    ProcessUiColumn::VmSize => self.proc_info.sort_by_key(|u| u.status.vm_size),
-                    ProcessUiColumn::VmRss => self.proc_info.sort_by_key(|u| u.status.vm_rss),
-                    ProcessUiColumn::RssShem => self.proc_info.sort_by_key(|u| u.status.rss_shem),
-                    ProcessUiColumn::RssProc => self
-                        .proc_info
-                        .sort_by(|u, v| u.status.rss_proc.total_cmp(&v.status.rss_proc)),
-                    ProcessUiColumn::CpuUsage => self
-                        .proc_info
-                        .sort_by(|u, v| u.status.cpu_usage.total_cmp(&v.status.cpu_usage)),
-                }
-
-                if self.table_order_settings.order == SortOrder::Descending {
-                    self.proc_info.reverse();
-                }
+                self.sort();
             }
             ProcessDisplayKind::Tree => {
-                // TODO: do it after data update, not every frame
+                self.sort();
+
                 let ppid_to_pid_map = self.get_ppid_to_pid_map();
 
-                self.proc_info.sort_by(|x, y| {
-                    let lhs_lvl = Self::get_pid_tree_lvl(x.pid, &ppid_to_pid_map);
-                    let rhs_lvl = Self::get_pid_tree_lvl(y.pid, &ppid_to_pid_map);
+                let mut correct_pid_order: Vec<u64> = Vec::with_capacity(self.proc_info.len());
 
-                    let lhs_parent = ppid_to_pid_map
-                        .iter()
-                        .find(|(_, pids)| pids.contains(&x.pid));
+                let root_pid = 1;
 
-                    let rhs_parent = ppid_to_pid_map
-                        .iter()
-                        .find(|(_, pids)| pids.contains(&y.pid));
+                correct_pid_order.push(root_pid);
 
-                    if lhs_parent == rhs_parent {
-                        return x.status.rss_proc.total_cmp(&y.status.rss_proc);
+                Self::add_descentants(root_pid, &ppid_to_pid_map, &mut correct_pid_order);
+
+                let pid_to_idx: HashMap<_, _> = self
+                    .proc_info
+                    .iter()
+                    .enumerate()
+                    .map(|(id, proc)| (proc.pid, id))
+                    .collect();
+
+                let mut new_proc_info: Vec<ProcessInfo> = Vec::with_capacity(self.proc_info.len());
+
+                for elem in &correct_pid_order {
+                    if let Some(&pid_idx) = pid_to_idx.get(elem)
+                        && let Some(proc_info_entry) = self.proc_info.get(pid_idx)
+                    {
+                        let mut clone = proc_info_entry.clone();
+                        clone.pid_lvl = Self::get_pid_tree_lvl(clone.pid, &ppid_to_pid_map);
+                        new_proc_info.push(proc_info_entry.clone());
                     }
+                }
 
-                    return x.status.rss_proc.total_cmp(&y.status.rss_proc);
-
-                    // if ppid_to_pid_map. == ppid_to_pid_map
-                    // return Self::compare_pid_by_depth(x.pid, y.pid, &ppid_to_pid_map);
-                })
+                self.proc_info = new_proc_info;
             }
         }
+    }
+
+    fn add_descentants(pid: u64, hierarchy: &BTreeMap<u64, Vec<u64>>, order_vec: &mut Vec<u64>) {
+        let children = Self::get_children(pid, hierarchy);
+        if !children.is_empty() {
+            for child in children {
+                order_vec.push(child);
+
+                Self::add_descentants(child, hierarchy, order_vec);
+            }
+        }
+    }
+
+    fn get_children(pid: u64, hierarchy: &BTreeMap<u64, Vec<u64>>) -> Vec<u64> {
+        if let Some(entry) = hierarchy.get(&pid) {
+            let mut descendants: Vec<u64> = Vec::with_capacity(entry.len());
+
+            for child in entry {
+                descendants.push(*child);
+            }
+
+            return descendants;
+        }
+
+        Vec::new()
     }
 
     fn get_ppid_to_pid_map(&self) -> BTreeMap<u64, Vec<u64>> {
@@ -199,22 +231,6 @@ impl App {
         }
 
         lvl
-    }
-
-    fn compare_pid_by_depth(
-        lhs: u64,
-        rhs: u64,
-        ppid_to_pid_map: &BTreeMap<u64, Vec<u64>>,
-    ) -> Ordering {
-        let lhs_lvl = Self::get_pid_tree_lvl(lhs, ppid_to_pid_map);
-        let rhs_lvl = Self::get_pid_tree_lvl(rhs, ppid_to_pid_map);
-
-        if lhs_lvl == rhs_lvl {
-            return Equal;
-        } else if lhs_lvl > rhs_lvl {
-            return Greater;
-        }
-        Less
     }
 
     fn draw(&self, frame: &mut Frame, table_state: &mut TableState) {
@@ -270,11 +286,9 @@ impl App {
 
         match self.current_screen {
             CurrentScreen::Main => {
-                let header = Row::new([
-                    "PID", "VIRT", "RSS", "SHR", "MEM(%)", "CPU(%)", "PPID", "cmd",
-                ])
-                .style(Style::new().bold())
-                .bottom_margin(1);
+                let header = Row::new(["PID", "VIRT", "RSS", "SHR", "MEM(%)", "CPU(%)", "cmd"])
+                    .style(Style::new().bold())
+                    .bottom_margin(1);
 
                 let mut rows: Vec<Row> = Vec::new();
 
@@ -286,10 +300,11 @@ impl App {
                         proc_info.status.rss_shem.to_string(),
                         format!("{:>2.4}", proc_info.status.rss_proc.to_string()),
                         format!("{:>2.4}", proc_info.status.cpu_usage.to_string()),
-                        proc_info
-                            .parent_pid
-                            .map_or("0".to_string(), |x| x.to_string()),
-                        proc_info.command.clone(),
+                        proc_info.parent_pid.map_or("<>".to_string(), |_| {
+                            " |".repeat(proc_info.pid_lvl as usize).to_string()
+                                + "-"
+                                + proc_info.command.as_str()
+                        }),
                     ]));
                 }
 
@@ -500,10 +515,10 @@ impl App {
             } else {
                 self.table_order_settings.order = SortOrder::Ascending;
             }
-            self.sort();
+            self.sort_display_kind();
             return;
         }
-        self.sort();
+        self.sort_display_kind();
     }
 
     fn on_watch_pid_event(&mut self, table_state: &mut TableState) {
@@ -529,7 +544,7 @@ impl App {
             ProcessDisplayKind::Tree => self.process_display_kind = ProcessDisplayKind::List,
         }
 
-        self.sort();
+        self.sort_display_kind();
     }
 
     fn handle_events(&mut self, table_state: &mut TableState) {

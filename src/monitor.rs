@@ -109,6 +109,7 @@ impl InfoReceiver {
                                         pid: pid as u64,
                                         parent_pid,
                                         status: status_result,
+                                        pid_lvl: 0,
                                     };
 
                                     proc_stats.push(process_info);
