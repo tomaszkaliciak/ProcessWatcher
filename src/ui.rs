@@ -314,8 +314,10 @@ impl App {
 
                 let mut rows: Vec<Row> = Vec::new();
 
+                let is_filter_mode_active = !self.current_text_input.to_string().is_empty();
+
                 for proc_info in &self.proc_info {
-                    if self.current_input_mode != InputMode::Normal
+                    if is_filter_mode_active
                         && !proc_info
                             .command
                             .contains(self.current_text_input.to_string().as_str())
@@ -596,8 +598,16 @@ impl App {
             && let Ok(event) = event::read()
             && let event::Event::Key(key) = event
         {
-            if self.current_input_mode == InputMode::Editing && key.code != KeyCode::Esc {
-                self.current_text_input.handle_event(&event);
+            if self.current_input_mode == InputMode::Editing {
+                if key.code == KeyCode::Esc {
+                    self.current_text_input.reset();
+                    self.current_input_mode = InputMode::Normal;
+                } else if key.code == KeyCode::Enter {
+                    self.current_input_mode = InputMode::Normal;
+                } else {
+                    self.current_text_input.handle_event(&event);
+                }
+
                 return;
             }
 
@@ -612,7 +622,6 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.current_input_mode = InputMode::Normal;
-                    self.current_text_input.reset();
                 }
                 KeyCode::Char('l') => {
                     self.current_screen = CurrentScreen::Watch;
