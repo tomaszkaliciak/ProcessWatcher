@@ -151,12 +151,21 @@ impl App {
                 let ppid_to_pid_map = self.get_ppid_to_pid_map();
 
                 let mut correct_pid_order: Vec<u64> = Vec::with_capacity(self.proc_info.len());
+                let mut pid_depths: HashMap<u64, u64> = HashMap::new();
 
                 let root_pid = 1;
+                let current_pid_depth = 0;
 
                 correct_pid_order.push(root_pid);
+                pid_depths.insert(root_pid, current_pid_depth);
 
-                Self::add_descentants(root_pid, &ppid_to_pid_map, &mut correct_pid_order);
+                Self::add_descentants(
+                    root_pid,
+                    &ppid_to_pid_map,
+                    &mut correct_pid_order,
+                    &mut pid_depths,
+                    current_pid_depth,
+                );
 
                 let pid_to_idx: HashMap<_, _> = self
                     .proc_info
@@ -167,13 +176,14 @@ impl App {
 
                 let mut new_proc_info: Vec<ProcessInfo> = Vec::with_capacity(self.proc_info.len());
 
-                for elem in &correct_pid_order {
-                    if let Some(&pid_idx) = pid_to_idx.get(elem)
+                for pid in &correct_pid_order {
+                    if let Some(&pid_idx) = pid_to_idx.get(pid)
                         && let Some(proc_info_entry) = self.proc_info.get(pid_idx)
+                        && let Some(proc_pid_depth) = pid_depths.get(pid)
                     {
                         let mut clone = proc_info_entry.clone();
-                        clone.pid_lvl = Self::get_pid_tree_lvl(clone.pid, &ppid_to_pid_map);
-                        new_proc_info.push(proc_info_entry.clone());
+                        clone.pid_lvl = *proc_pid_depth;
+                        new_proc_info.push(clone);
                     }
                 }
 
@@ -182,13 +192,19 @@ impl App {
         }
     }
 
-    fn add_descentants(pid: u64, hierarchy: &BTreeMap<u64, Vec<u64>>, order_vec: &mut Vec<u64>) {
+    fn add_descentants(
+        pid: u64,
+        hierarchy: &BTreeMap<u64, Vec<u64>>,
+        order_vec: &mut Vec<u64>,
+        pid_depths: &mut HashMap<u64, u64>,
+        current_depth: u64,
+    ) {
         let children = Self::get_children(pid, hierarchy);
         if !children.is_empty() {
             for child in children {
                 order_vec.push(child);
-
-                Self::add_descentants(child, hierarchy, order_vec);
+                pid_depths.insert(child, current_depth + 1);
+                Self::add_descentants(child, hierarchy, order_vec, pid_depths, current_depth + 1);
             }
         }
     }
@@ -216,21 +232,6 @@ impl App {
             }
         }
         ppid_to_pid_map
-    }
-
-    fn get_pid_tree_lvl(pid: u64, ppid_to_pid_map: &BTreeMap<u64, Vec<u64>>) -> u64 {
-        let mut current_pid = pid;
-        let mut lvl = 0;
-
-        while let Some(entry) = ppid_to_pid_map
-            .iter()
-            .find(|(_, pids)| pids.contains(&current_pid))
-        {
-            lvl += 1;
-            current_pid = *entry.0;
-        }
-
-        lvl
     }
 
     fn draw(&self, frame: &mut Frame, table_state: &mut TableState) {
