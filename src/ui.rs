@@ -14,6 +14,10 @@ use ratatui::{
 };
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
+
+use tui_input::Input;
+use tui_input::backend::crossterm::EventHandler;
+
 const UI_COLUMNS: [ProcessUiColumn; 7] = [
     ProcessUiColumn::Pid,
     ProcessUiColumn::VmSize,
@@ -56,6 +60,13 @@ enum ProcessDisplayKind {
     Tree,
 }
 
+#[derive(Debug, Default, PartialEq)]
+enum InputMode {
+    #[default]
+    Normal,
+    Editing,
+}
+
 #[derive(Debug, Default)]
 pub struct App {
     totalram: u64,
@@ -68,6 +79,8 @@ pub struct App {
     cpu_history: MemCpuHistory,
     current_screen: CurrentScreen,
     process_display_kind: ProcessDisplayKind,
+    current_input_mode: InputMode,
+    current_text_input: Input,
     exit: bool,
 }
 
@@ -227,6 +240,10 @@ impl App {
             "<p>,".blue().bold(),
             " Watched process stats ".into(),
             "<l>,".blue().bold(),
+            " Filter ".into(),
+            "<f>,".blue().bold(),
+            " Toggle tree/list view ".into(),
+            "<t>,".blue().bold(),
             " Start watching process".into(),
             "<w>,".blue().bold(),
             " Go to main screen ".into(),
@@ -256,16 +273,34 @@ impl App {
             total_memory_gb.to_string().yellow(),
         ])]);
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(1),
-                Constraint::Length(8),
-                Constraint::Max(1),
-            ])
-            .spacing(1)
-            .split(frame.area());
+        let chunks = if self.current_input_mode == InputMode::Normal {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Min(1),
+                    Constraint::Length(8),
+                    Constraint::Max(1),
+                ])
+                .spacing(1)
+                .split(frame.area())
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Min(1),
+                    Constraint::Length(8),
+                    Constraint::Max(1),
+                    Constraint::Max(3),
+                ])
+                .spacing(1)
+                .split(frame.area())
+        };
+
+        if self.current_input_mode == InputMode::Editing {
+            self.render_text_input(frame, chunks[4]);
+        }
 
         let paragraph = Paragraph::new(counter_text).centered().block(block);
 
@@ -280,6 +315,13 @@ impl App {
                 let mut rows: Vec<Row> = Vec::new();
 
                 for proc_info in &self.proc_info {
+                    if self.current_input_mode != InputMode::Normal
+                        && !proc_info
+                            .command
+                            .contains(self.current_text_input.to_string().as_str())
+                    {
+                        continue;
+                    }
                     rows.push(Row::new([
                         proc_info.pid.to_string(),
                         proc_info.status.vm_size.to_string(),
@@ -525,6 +567,21 @@ impl App {
         }
     }
 
+    fn render_text_input(&self, frame: &mut Frame, area: Rect) {
+        let width = area.width.max(3) - 3;
+        let scroll = self.current_text_input.visual_scroll(width as usize);
+        let style = Color::Yellow;
+
+        let input = Paragraph::new(self.current_text_input.value())
+            .style(style)
+            .scroll((0, scroll as u16))
+            .block(Block::bordered().title("Filter:"));
+        frame.render_widget(input, area);
+
+        let x = self.current_text_input.visual_cursor().max(scroll) - scroll + 1;
+        frame.set_cursor_position((area.x + x as u16, area.y + 1))
+    }
+
     fn on_toogle_pid_view_event(&mut self) {
         match self.process_display_kind {
             ProcessDisplayKind::List => self.process_display_kind = ProcessDisplayKind::Tree,
@@ -536,14 +593,27 @@ impl App {
 
     fn handle_events(&mut self, table_state: &mut TableState) {
         if let Ok(true) = event::poll(Duration::from_millis(100))
-            && let Ok(event::Event::Key(key)) = event::read()
+            && let Ok(event) = event::read()
+            && let event::Event::Key(key) = event
         {
+            if self.current_input_mode == InputMode::Editing && key.code != KeyCode::Esc {
+                self.current_text_input.handle_event(&event);
+                return;
+            }
+
             match key.code {
                 KeyCode::Char('q') => self.exit(),
                 KeyCode::Down => table_state.select_next(),
                 KeyCode::Up => table_state.select_previous(),
                 KeyCode::Right => table_state.select_next_column(),
                 KeyCode::Left => table_state.select_previous_column(),
+                KeyCode::Char('f') => {
+                    self.current_input_mode = InputMode::Editing;
+                }
+                KeyCode::Esc => {
+                    self.current_input_mode = InputMode::Normal;
+                    self.current_text_input.reset();
+                }
                 KeyCode::Char('l') => {
                     self.current_screen = CurrentScreen::Watch;
                 }
