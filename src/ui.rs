@@ -199,28 +199,14 @@ impl App {
         pid_depths: &mut HashMap<u64, u64>,
         current_depth: u64,
     ) {
-        let children = Self::get_children(pid, hierarchy);
+        let children: &[u64] = hierarchy.get(&pid).map_or(&[], |x| x.as_slice());
         if !children.is_empty() {
             for child in children {
-                order_vec.push(child);
-                pid_depths.insert(child, current_depth + 1);
-                Self::add_descentants(child, hierarchy, order_vec, pid_depths, current_depth + 1);
+                order_vec.push(*child);
+                pid_depths.insert(*child, current_depth + 1);
+                Self::add_descentants(*child, hierarchy, order_vec, pid_depths, current_depth + 1);
             }
         }
-    }
-
-    fn get_children(pid: u64, hierarchy: &BTreeMap<u64, Vec<u64>>) -> Vec<u64> {
-        if let Some(entry) = hierarchy.get(&pid) {
-            let mut descendants: Vec<u64> = Vec::with_capacity(entry.len());
-
-            for child in entry {
-                descendants.push(*child);
-            }
-
-            return descendants;
-        }
-
-        Vec::new()
     }
 
     fn get_ppid_to_pid_map(&self) -> BTreeMap<u64, Vec<u64>> {
