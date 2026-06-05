@@ -2,8 +2,8 @@ use crate::models::{CpuUsageState, MemInfo, ProcessCpuTime, ProcessInfo};
 use tokio::task::JoinSet;
 
 use crate::parser::{
-    get_free_available_total_memory, get_proc_stat_data, parse_proc_pid_parent,
-    parse_proc_pid_stat_cpu_usage, parse_proc_pid_status,
+    get_free_available_total_memory, get_proc_stat_data, get_proc_uptime, parse_proc_pid_parent,
+    parse_proc_pid_stat_cpu_usage, parse_proc_pid_stat_uptime, parse_proc_pid_status,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -40,7 +40,6 @@ impl InfoReceiver {
 
                             let meminfo_output =
                                 tokio::fs::read_to_string("/proc/meminfo").await.unwrap();
-
                             (
                                 mem_info.mem_cpu_stats.free_memory,
                                 mem_info.mem_cpu_stats.available_memory,
@@ -52,6 +51,8 @@ impl InfoReceiver {
                             let elapsed_seconds = last_sample_time.elapsed().as_secs_f32();
 
                             let mut set = JoinSet::new();
+
+                            let system_uptime = get_proc_uptime().await;
 
                             for path in fs::read_dir("/proc").unwrap() {
                                 let pid_result: Result<i32, _> = path
@@ -97,6 +98,9 @@ impl InfoReceiver {
                                         continue;
                                     }
 
+                                    status_result.uptime =
+                                        parse_proc_pid_stat_uptime(system_uptime, &stat);
+
                                     status_result.cpu_usage = parse_proc_pid_stat_cpu_usage(
                                         pid,
                                         stat,
@@ -116,6 +120,7 @@ impl InfoReceiver {
                                 }
                             }
 
+                            mem_info.uptime = system_uptime;
                             mem_info.mem_cpu_stats.cpu_usage =
                                 get_proc_stat_data(&mut cpu_usage_state).await;
 

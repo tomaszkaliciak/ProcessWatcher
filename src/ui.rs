@@ -18,13 +18,14 @@ use std::time::Duration;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
-const UI_COLUMNS: [ProcessUiColumn; 7] = [
+const UI_COLUMNS: [ProcessUiColumn; 8] = [
     ProcessUiColumn::Pid,
     ProcessUiColumn::VmSize,
     ProcessUiColumn::VmRss,
     ProcessUiColumn::RssShem,
     ProcessUiColumn::RssProc,
     ProcessUiColumn::CpuUsage,
+    ProcessUiColumn::Uptime,
     ProcessUiColumn::Command,
 ];
 
@@ -37,6 +38,7 @@ enum ProcessUiColumn {
     VmRss,
     RssShem,
     RssProc,
+    Uptime,
     CpuUsage,
 }
 
@@ -70,6 +72,7 @@ enum InputMode {
 #[derive(Debug, Default)]
 pub struct App {
     totalram: u64,
+    uptime: u64,
     availableram: u64,
     freeram: u64,
     cpu_usage: BTreeMap<String, f32>,
@@ -110,6 +113,7 @@ impl App {
             self.handle_events(&mut table_state);
 
             while let Ok(result) = info_receiver.reciver.try_recv() {
+                self.uptime = result.uptime;
                 self.freeram = result.mem_cpu_stats.free_memory;
                 self.availableram = result.mem_cpu_stats.available_memory;
                 self.totalram = result.mem_cpu_stats.total_memory;
@@ -133,6 +137,14 @@ impl App {
         Ok(())
     }
 
+    fn format_to_hh_mm_ss(total_seconds: u64) -> String {
+        let hours = total_seconds / 3600;
+        let minutes = (total_seconds % 3600) / 60;
+        let seconds = total_seconds % 60;
+
+        format!("{:01}:{:02}:{:02}", hours, minutes, seconds)
+    }
+
     fn sort(&mut self) {
         match self.table_order_settings.order_by_field {
             ProcessUiColumn::Command => self.proc_info.sort_by(|a, b| a.command.cmp(&b.command)),
@@ -140,6 +152,7 @@ impl App {
             ProcessUiColumn::VmSize => self.proc_info.sort_by_key(|u| u.status.vm_size),
             ProcessUiColumn::VmRss => self.proc_info.sort_by_key(|u| u.status.vm_rss),
             ProcessUiColumn::RssShem => self.proc_info.sort_by_key(|u| u.status.rss_shem),
+            ProcessUiColumn::Uptime => self.proc_info.sort_by_key(|u| u.status.uptime),
             ProcessUiColumn::RssProc => self
                 .proc_info
                 .sort_by(|u, v| u.status.rss_proc.total_cmp(&v.status.rss_proc)),
@@ -271,6 +284,8 @@ impl App {
             mem_usage.to_string().green(),
             ", Total memory (GB): ".into(),
             total_memory_gb.to_string().yellow(),
+            ", Uptime(s): ".into(),
+            Self::format_to_hh_mm_ss(self.uptime).yellow(),
         ])]);
 
         let chunks = if self.current_input_mode == InputMode::Normal {
@@ -308,9 +323,11 @@ impl App {
 
         match self.current_screen {
             CurrentScreen::Main => {
-                let header = Row::new(["PID", "VIRT", "RSS", "SHR", "MEM(%)", "CPU(%)", "cmd"])
-                    .style(Style::new().bold())
-                    .bottom_margin(1);
+                let header = Row::new([
+                    "PID", "VIRT", "RSS", "SHR", "MEM(%)", "CPU(%)", "Uptime", "cmd",
+                ])
+                .style(Style::new().bold())
+                .bottom_margin(1);
 
                 let mut rows: Vec<Row> = Vec::new();
 
@@ -331,6 +348,7 @@ impl App {
                         proc_info.status.rss_shem.to_string(),
                         format!("{:>2.4}", proc_info.status.rss_proc.to_string()),
                         format!("{:>2.4}", proc_info.status.cpu_usage.to_string()),
+                        Self::format_to_hh_mm_ss(proc_info.status.uptime),
                         proc_info.parent_pid.map_or("<>".to_string(), |_| {
                             " |".repeat(proc_info.pid_lvl as usize).to_string()
                                 + "-"
@@ -384,8 +402,9 @@ impl App {
                     Constraint::Max(12),
                     Constraint::Max(12),
                     Constraint::Max(10),
-                    Constraint::Max(10),
-                    Constraint::Max(10),
+                    Constraint::Max(6),
+                    Constraint::Max(6),
+                    Constraint::Max(8),
                     Constraint::Min(30),
                 ];
                 let table = Table::new(rows, widths)

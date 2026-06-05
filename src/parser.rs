@@ -1,5 +1,6 @@
 use crate::models::{CpuUsageState, ProcessCpuTime, ProcessStatus};
 
+use cli_log::info;
 use std::collections::{BTreeMap, HashMap};
 use tokio::io::AsyncReadExt;
 
@@ -106,6 +107,19 @@ pub fn parse_proc_pid_stat_cpu_usage(
     0.0
 }
 
+pub fn parse_proc_pid_stat_uptime(system_uptime: u64, input: &str) -> u64 {
+    let splits: Vec<&str> = input.split_whitespace().collect();
+
+    if let Some(start_time) = splits.get(21)
+        && let Ok(parsed_start_time) = { start_time.parse::<u64>() }
+    {
+        const CLK_TCK: u64 = 100;
+        return system_uptime - (parsed_start_time / CLK_TCK);
+    }
+
+    0
+}
+
 pub async fn get_proc_stat_data(
     cpu_usage_state_cache: &mut HashMap<String, CpuUsageState>,
 ) -> BTreeMap<String, f32> {
@@ -155,6 +169,22 @@ pub async fn get_proc_stat_data(
     }
 
     output
+}
+
+pub async fn get_proc_uptime() -> u64 {
+    let file_content = tokio::fs::read_to_string("/proc/uptime").await.unwrap();
+
+    let system_uptime: u64 = file_content
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .parse::<f64>()
+        .map(|f| f as u64)
+        .unwrap_or_default();
+
+    info!("{:?}", system_uptime);
+
+    system_uptime
 }
 
 #[derive(Debug, Default)]

@@ -43,6 +43,7 @@ pub struct MemCpuInfo {
 
 #[derive(Debug, Default)]
 pub struct MemInfo {
+    pub uptime: u64,
     pub mem_cpu_stats: MemCpuInfo,
     pub process_stats: Vec<ProcessInfo>,
 }
@@ -63,6 +64,7 @@ pub struct ProcessStatus {
     pub rss_shem: u64,
     pub rss_proc: f32,
     pub cpu_usage: f32,
+    pub uptime: u64,
 }
 
 pub struct ProcessCpuTime {
