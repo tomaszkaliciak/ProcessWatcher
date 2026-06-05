@@ -1,6 +1,7 @@
 use crate::models::{MemCpuHistory, ProcessHistory, ProcessInfo, RingBuffer};
 use crate::monitor::InfoReceiver;
 use crossterm::event::{self, KeyCode};
+use libc::free;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::symbols::{self, Marker};
@@ -31,15 +32,15 @@ const UI_COLUMNS: [ProcessUiColumn; 8] = [
 
 #[derive(Debug, Default, PartialEq, Clone, Copy)]
 enum ProcessUiColumn {
-    Command,
     Pid,
     VmSize,
     #[default]
     VmRss,
     RssShem,
     RssProc,
-    Uptime,
     CpuUsage,
+    Uptime,
+    Command,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -248,22 +249,46 @@ impl App {
 
     fn draw(&self, frame: &mut Frame, table_state: &mut TableState) {
         let title = Line::from(" Process Watcher ".bold());
-        let instructions = Line::from(vec![
-            " CPU usage plots ".into(),
-            "<p>,".blue().bold(),
-            " Watched process stats ".into(),
-            "<l>,".blue().bold(),
-            " Filter ".into(),
-            "<f>,".blue().bold(),
-            " Toggle tree/list view ".into(),
-            "<t>,".blue().bold(),
-            " Start watching process".into(),
-            "<w>,".blue().bold(),
-            " Go to main screen ".into(),
-            "<m>,".blue().bold(),
-            " Quit ".into(),
-            "<Q> ".blue().bold(),
-        ]);
+
+        let mut intructions: Vec<Span> = Vec::new();
+
+        match self.current_screen {
+            CurrentScreen::Main => {
+                intructions.append(&mut vec![
+                    " CPU usage plots ".into(),
+                    "<p>,".blue().bold(),
+                    " Watched process stats ".into(),
+                    "<l>,".blue().bold(),
+                    " Filter ".into(),
+                    "<f>,".blue().bold(),
+                    " Toggle tree/list view ".into(),
+                    "<t>,".blue().bold(),
+                    " Start watching process".into(),
+                    "<w>,".blue().bold(),
+                ]);
+            }
+            CurrentScreen::Plots => {
+                intructions.append(&mut vec![
+                    " Main view ".into(),
+                    "<m>,".blue().bold(),
+                    " Watched process stats ".into(),
+                    "<l>,".blue().bold(),
+                ]);
+            }
+            CurrentScreen::Watch => {
+                intructions.append(&mut vec![
+                    " Main view ".into(),
+                    "<m>,".blue().bold(),
+                    " CPU usage plots ".into(),
+                    "<p>,".blue().bold(),
+                ]);
+            }
+        }
+
+        intructions.append(&mut vec![" Quit ".into(), "<Q> ".blue().bold()]);
+
+        let instructions = Line::from(intructions);
+
         let block = Block::bordered()
             .title(title.centered())
             .title_bottom(instructions.centered())
@@ -277,13 +302,13 @@ impl App {
 
         let counter_text = Text::from(vec![Line::from(vec![
             "Free memory (GB): ".into(),
-            free_memory_gb.to_string().green(),
+            format!("{:.3}", free_memory_gb).green(),
             ", Available memory (GB): ".into(),
-            available_memory_gb.to_string().green(),
+            format!("{:.3}", available_memory_gb).green(),
             ", Memory usage [%]: ".into(),
-            mem_usage.to_string().green(),
+            format!("{:.2}", mem_usage).green(),
             ", Total memory (GB): ".into(),
-            total_memory_gb.to_string().yellow(),
+            format!("{:.2}", total_memory_gb).green(),
             ", Uptime(s): ".into(),
             Self::format_to_hh_mm_ss(self.uptime).yellow(),
         ])]);
