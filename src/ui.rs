@@ -1,7 +1,6 @@
 use crate::models::{MemCpuHistory, ProcessHistory, ProcessInfo, RingBuffer};
 use crate::monitor::InfoReceiver;
 use crossterm::event::{self, KeyCode};
-use libc::free;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::symbols::{self, Marker};
@@ -657,15 +656,35 @@ impl App {
 
             match key.code {
                 KeyCode::Char('q') => self.exit(),
-                KeyCode::Down => table_state.select_next(),
-                KeyCode::Up => table_state.select_previous(),
-                KeyCode::Right => table_state.select_next_column(),
-                KeyCode::Left => table_state.select_previous_column(),
+                KeyCode::Down => {
+                    if let CurrentScreen::Main = self.current_screen {
+                        table_state.select_next();
+                    };
+                }
+                KeyCode::Up => {
+                    if let CurrentScreen::Main = self.current_screen {
+                        table_state.select_previous();
+                    }
+                }
+                KeyCode::Right => {
+                    if let CurrentScreen::Main = self.current_screen {
+                        table_state.select_next_column();
+                    }
+                }
+                KeyCode::Left => {
+                    if let CurrentScreen::Main = self.current_screen {
+                        table_state.select_previous_column();
+                    }
+                }
                 KeyCode::Char('f') => {
-                    self.current_input_mode = InputMode::Editing;
+                    if let CurrentScreen::Main = self.current_screen {
+                        self.current_input_mode = InputMode::Editing;
+                    };
                 }
                 KeyCode::Esc => {
-                    self.current_input_mode = InputMode::Normal;
+                    if let CurrentScreen::Main = self.current_screen {
+                        self.current_input_mode = InputMode::Normal;
+                    };
                 }
                 KeyCode::Char('l') => {
                     self.current_screen = CurrentScreen::Watch;
@@ -677,13 +696,19 @@ impl App {
                     self.current_screen = CurrentScreen::Plots;
                 }
                 KeyCode::Char('s') => {
-                    self.on_sort_requested_event(table_state);
+                    if let CurrentScreen::Main = self.current_screen {
+                        self.on_sort_requested_event(table_state);
+                    }
                 }
                 KeyCode::Char('w') => {
-                    self.on_watch_pid_event(table_state);
+                    if let CurrentScreen::Main = self.current_screen {
+                        self.on_watch_pid_event(table_state);
+                    }
                 }
                 KeyCode::Char('t') => {
-                    self.on_toogle_pid_view_event();
+                    if let CurrentScreen::Main = self.current_screen {
+                        self.on_toogle_pid_view_event();
+                    };
                 }
                 _ => {}
             }
