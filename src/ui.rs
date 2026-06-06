@@ -66,7 +66,8 @@ enum ProcessDisplayKind {
 enum InputMode {
     #[default]
     Normal,
-    Editing,
+    EditingFilter,
+    EditingSearch,
 }
 
 #[derive(Debug, Default)]
@@ -83,7 +84,9 @@ pub struct App {
     current_screen: CurrentScreen,
     process_display_kind: ProcessDisplayKind,
     current_input_mode: InputMode,
-    current_text_input: Input,
+    current_filter_input: Input,
+    current_search_input: Input,
+    row_selected_in_search: u64,
     exit: bool,
 }
 
@@ -252,20 +255,48 @@ impl App {
         let mut intructions: Vec<Span> = Vec::new();
 
         match self.current_screen {
-            CurrentScreen::Main => {
-                intructions.append(&mut vec![
-                    " CPU usage plots ".into(),
-                    "<p>,".blue().bold(),
-                    " Watched process stats ".into(),
-                    "<l>,".blue().bold(),
-                    " Filter ".into(),
-                    "<f>,".blue().bold(),
-                    " Toggle tree/list view ".into(),
-                    "<t>,".blue().bold(),
-                    " Start watching process".into(),
-                    "<w>,".blue().bold(),
-                ]);
-            }
+            CurrentScreen::Main => match self.current_input_mode {
+                InputMode::Normal => {
+                    intructions.append(&mut vec![
+                        " CPU usage plots ".into(),
+                        "<p>,".blue().bold(),
+                        " Watched process stats ".into(),
+                        "<l>,".blue().bold(),
+                        (if self.current_filter_input.to_string().is_empty() {
+                            " Filter ".into()
+                        } else {
+                            " FILTER ".into()
+                        }),
+                        "<f>,".blue().bold(),
+                        " Search ".into(),
+                        "<s>,".blue().bold(),
+                        " Toggle tree/list view ".into(),
+                        "<t>,".blue().bold(),
+                        " Start watching process".into(),
+                        "<w>,".blue().bold(),
+                        " Sort".into(),
+                        "<r>,".blue().bold(),
+                    ]);
+                }
+                InputMode::EditingFilter => {
+                    intructions.append(&mut vec![
+                        " Done ".into(),
+                        "<ENTER>,".blue().bold(),
+                        " Cancel ".into(),
+                        "<ESC>,".blue().bold(),
+                    ]);
+                }
+                InputMode::EditingSearch => {
+                    intructions.append(&mut vec![
+                        " Next ".into(),
+                        "<KEY_DOWN>,".blue().bold(),
+                        " Previous ".into(),
+                        "<KEY_UP>,".blue().bold(),
+                        " Cancel ".into(),
+                        "<ESC>,".blue().bold(),
+                    ]);
+                }
+            },
             CurrentScreen::Plots => {
                 intructions.append(&mut vec![
                     " Main view ".into(),
@@ -337,8 +368,10 @@ impl App {
                 .split(frame.area())
         };
 
-        if self.current_input_mode == InputMode::Editing {
-            self.render_text_input(frame, chunks[4]);
+        if self.current_input_mode == InputMode::EditingFilter {
+            self.render_text_input(frame, &self.current_filter_input, "Filter: ", chunks[4]);
+        } else if self.current_input_mode == InputMode::EditingSearch {
+            self.render_text_input(frame, &self.current_search_input, "Search: ", chunks[4]);
         }
 
         let paragraph = Paragraph::new(counter_text).centered().block(block);
@@ -355,16 +388,32 @@ impl App {
 
                 let mut rows: Vec<Row> = Vec::new();
 
-                let is_filter_mode_active = !self.current_text_input.to_string().is_empty();
+                let is_filter_mode_active = !self.current_filter_input.to_string().is_empty();
 
-                for proc_info in &self.proc_info {
+                let is_search_mode_active = !self.current_search_input.to_string().is_empty();
+
+                let mut search_found = false;
+
+                for (idx, proc_info) in self.proc_info.iter().enumerate() {
                     if is_filter_mode_active
                         && !proc_info
                             .command
-                            .contains(self.current_text_input.to_string().as_str())
+                            .contains(self.current_filter_input.to_string().as_str())
                     {
                         continue;
                     }
+
+                    if is_search_mode_active
+                        && !search_found
+                        && idx >= self.row_selected_in_search as usize
+                        && proc_info
+                            .command
+                            .contains(self.current_search_input.to_string().as_str())
+                    {
+                        table_state.select(Some(idx));
+                        search_found = true;
+                    }
+
                     rows.push(Row::new([
                         proc_info.pid.to_string(),
                         proc_info.status.vm_size.to_string(),
@@ -612,18 +661,24 @@ impl App {
         }
     }
 
-    fn render_text_input(&self, frame: &mut Frame, area: Rect) {
+    fn render_text_input(
+        &self,
+        frame: &mut Frame,
+        input_field: &Input,
+        block_title: &str,
+        area: Rect,
+    ) {
         let width = area.width.max(3) - 3;
-        let scroll = self.current_text_input.visual_scroll(width as usize);
+        let scroll = input_field.visual_scroll(width as usize);
         let style = Color::Yellow;
 
-        let input = Paragraph::new(self.current_text_input.value())
+        let input = Paragraph::new(input_field.value())
             .style(style)
             .scroll((0, scroll as u16))
-            .block(Block::bordered().title("Filter:"));
+            .block(Block::bordered().title(block_title));
         frame.render_widget(input, area);
 
-        let x = self.current_text_input.visual_cursor().max(scroll) - scroll + 1;
+        let x = input_field.visual_cursor().max(scroll) - scroll + 1;
         frame.set_cursor_position((area.x + x as u16, area.y + 1))
     }
 
@@ -641,14 +696,44 @@ impl App {
             && let Ok(event) = event::read()
             && let event::Event::Key(key) = event
         {
-            if self.current_input_mode == InputMode::Editing {
+            if self.current_input_mode == InputMode::EditingFilter {
                 if key.code == KeyCode::Esc {
-                    self.current_text_input.reset();
+                    self.current_filter_input.reset();
                     self.current_input_mode = InputMode::Normal;
                 } else if key.code == KeyCode::Enter {
                     self.current_input_mode = InputMode::Normal;
                 } else {
-                    self.current_text_input.handle_event(&event);
+                    self.current_filter_input.handle_event(&event);
+                }
+
+                return;
+            }
+
+            if self.current_input_mode == InputMode::EditingSearch {
+                if key.code == KeyCode::Esc {
+                    self.current_search_input.reset();
+                    self.current_input_mode = InputMode::Normal;
+                } else if key.code == KeyCode::Down {
+                    if self.row_selected_in_search > 1
+                        && let Some(result) = self
+                            .proc_info
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .skip(self.proc_info.len() - self.row_selected_in_search as usize)
+                            .find(|(_, x)| {
+                                x.command
+                                    .contains(self.current_search_input.to_string().as_str())
+                            })
+                    {
+                        self.row_selected_in_search = result.0 as u64;
+                    }
+                } else if key.code == KeyCode::Up {
+                    if (self.row_selected_in_search as usize) < self.proc_info.len() {
+                        self.row_selected_in_search += 1;
+                    }
+                } else {
+                    self.current_search_input.handle_event(&event);
                 }
 
                 return;
@@ -678,7 +763,12 @@ impl App {
                 }
                 KeyCode::Char('f') => {
                     if let CurrentScreen::Main = self.current_screen {
-                        self.current_input_mode = InputMode::Editing;
+                        self.current_input_mode = InputMode::EditingFilter;
+                    };
+                }
+                KeyCode::Char('s') => {
+                    if let CurrentScreen::Main = self.current_screen {
+                        self.current_input_mode = InputMode::EditingSearch;
                     };
                 }
                 KeyCode::Esc => {
@@ -695,7 +785,7 @@ impl App {
                 KeyCode::Char('p') => {
                     self.current_screen = CurrentScreen::Plots;
                 }
-                KeyCode::Char('s') => {
+                KeyCode::Char('r') => {
                     if let CurrentScreen::Main = self.current_screen {
                         self.on_sort_requested_event(table_state);
                     }
