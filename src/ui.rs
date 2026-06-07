@@ -1,6 +1,10 @@
 use crate::models::{MemCpuHistory, ProcessHistory, ProcessInfo, RingBuffer};
 use crate::monitor::InfoReceiver;
-use crossterm::event::{self, KeyCode};
+use cli_log::info;
+use crossterm::event::{
+    self, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::symbols::{self, Marker};
@@ -13,6 +17,7 @@ use ratatui::{
     widgets::{Block, Dataset, Gauge, List, ListItem, Paragraph, Row, Table, TableState},
 };
 use std::collections::{BTreeMap, HashMap};
+use std::io;
 use std::time::Duration;
 
 use tui_input::Input;
@@ -87,6 +92,9 @@ pub struct App {
     current_filter_input: Input,
     current_search_input: Input,
     row_selected_in_search: u64,
+    table_area: Rect,
+    column_areas: Vec<Rect>,
+    table_state: TableState,
     exit: bool,
 }
 
@@ -102,18 +110,19 @@ impl App {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         let mut info_receiver = InfoReceiver::new();
 
-        let mut table_state = TableState::default();
-        table_state.select_first();
-        table_state.select_first_column();
+        self.table_state.select_first();
+        self.table_state.select_first_column();
 
         self.cpu_history = MemCpuHistory {
             history: RingBuffer::new(200),
         };
 
-        while !self.exit {
-            terminal.draw(|frame| self.draw(frame, &mut table_state))?;
+        execute!(io::stdout(), EnableMouseCapture)?;
 
-            self.handle_events(&mut table_state);
+        while !self.exit {
+            terminal.draw(|frame| self.draw(frame))?;
+
+            self.handle_events();
 
             while let Ok(result) = info_receiver.reciver.try_recv() {
                 self.uptime = result.uptime;
@@ -249,7 +258,7 @@ impl App {
         ppid_to_pid_map
     }
 
-    fn draw(&self, frame: &mut Frame, table_state: &mut TableState) {
+    fn draw(&mut self, frame: &mut Frame) {
         let title = Line::from(" Process Watcher ".bold());
 
         let mut intructions: Vec<Span> = Vec::new();
@@ -410,7 +419,7 @@ impl App {
                             .command
                             .contains(self.current_search_input.to_string().as_str())
                     {
-                        table_state.select(Some(idx));
+                        self.table_state.select(Some(idx));
                         search_found = true;
                     }
 
@@ -480,6 +489,15 @@ impl App {
                     Constraint::Max(8),
                     Constraint::Min(30),
                 ];
+
+                let column_layouts = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints(widths)
+                    .split(chunks[1]);
+
+                self.table_area = chunks[1];
+                self.column_areas = column_layouts.to_vec();
+
                 let table = Table::new(rows, widths)
                     .header(header)
                     .column_spacing(1)
@@ -489,7 +507,7 @@ impl App {
                     .cell_highlight_style(Style::new().reversed().yellow())
                     .highlight_symbol("() ");
 
-                frame.render_stateful_widget(table, chunks[1], table_state);
+                frame.render_stateful_widget(table, chunks[1], &mut self.table_state);
             }
             CurrentScreen::Plots => {
                 let col_constraints = (0..2).map(|_| Constraint::Min(9));
@@ -626,8 +644,8 @@ impl App {
         }
     }
 
-    fn on_sort_requested_event(&mut self, table_state: &mut TableState) {
-        if let Some(idx) = table_state.selected_column()
+    fn on_sort_requested_event(&mut self) {
+        if let Some(idx) = self.table_state.selected_column()
             && let Some(col) = UI_COLUMNS.get(idx)
         {
             if self.table_order_settings.order_by_field != *col {
@@ -644,8 +662,8 @@ impl App {
         self.sort_display_kind();
     }
 
-    fn on_watch_pid_event(&mut self, table_state: &mut TableState) {
-        if let Some(idx) = table_state.selected_cell()
+    fn on_watch_pid_event(&mut self) {
+        if let Some(idx) = self.table_state.selected_cell()
             && let Some(selected_process) = self.proc_info.get(idx.0)
         {
             if let Some(currently_observered_pid) = &self.watched_pid
@@ -691,11 +709,45 @@ impl App {
         self.sort_display_kind();
     }
 
-    fn handle_events(&mut self, table_state: &mut TableState) {
-        if let Ok(true) = event::poll(Duration::from_millis(100))
-            && let Ok(event) = event::read()
-            && let event::Event::Key(key) = event
-        {
+    fn on_mouse_event(&mut self, event: MouseEvent) {
+        if event.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+
+        let mouse_x = event.column;
+        let mouse_y = event.row;
+
+        if mouse_y >= self.table_area.top() && mouse_y < self.table_area.bottom() {
+            let mut clicked_column_idx = None;
+            for (idx, col_rect) in self.column_areas.iter().enumerate() {
+                if mouse_x >= col_rect.left() && mouse_x < col_rect.right() {
+                    clicked_column_idx = Some(idx);
+                    break;
+                }
+            }
+
+            if let Some(col_idx) = clicked_column_idx {
+                let header_height = 2;
+
+                if mouse_y < self.table_area.top() + header_height
+                    && let Some(col) = UI_COLUMNS.get(col_idx)
+                {
+                    if self.table_order_settings.order_by_field != *col {
+                        self.table_order_settings.order_by_field = *col;
+                        self.table_order_settings.order = SortOrder::Descending;
+                    } else if self.table_order_settings.order == SortOrder::Ascending {
+                        self.table_order_settings.order = SortOrder::Descending;
+                    } else {
+                        self.table_order_settings.order = SortOrder::Ascending;
+                    }
+                    self.sort_display_kind();
+                }
+            }
+        }
+    }
+
+    fn on_key_event(&mut self, event: Event) {
+        if let Event::Key(key) = event {
             if self.current_input_mode == InputMode::EditingFilter {
                 if key.code == KeyCode::Esc {
                     self.current_filter_input.reset();
@@ -743,22 +795,22 @@ impl App {
                 KeyCode::Char('q') => self.exit(),
                 KeyCode::Down => {
                     if let CurrentScreen::Main = self.current_screen {
-                        table_state.select_next();
+                        self.table_state.select_next();
                     };
                 }
                 KeyCode::Up => {
                     if let CurrentScreen::Main = self.current_screen {
-                        table_state.select_previous();
+                        self.table_state.select_previous();
                     }
                 }
                 KeyCode::Right => {
                     if let CurrentScreen::Main = self.current_screen {
-                        table_state.select_next_column();
+                        self.table_state.select_next_column();
                     }
                 }
                 KeyCode::Left => {
                     if let CurrentScreen::Main = self.current_screen {
-                        table_state.select_previous_column();
+                        self.table_state.select_previous_column();
                     }
                 }
                 KeyCode::Char('f') => {
@@ -787,12 +839,12 @@ impl App {
                 }
                 KeyCode::Char('r') => {
                     if let CurrentScreen::Main = self.current_screen {
-                        self.on_sort_requested_event(table_state);
+                        self.on_sort_requested_event();
                     }
                 }
                 KeyCode::Char('w') => {
                     if let CurrentScreen::Main = self.current_screen {
-                        self.on_watch_pid_event(table_state);
+                        self.on_watch_pid_event();
                     }
                 }
                 KeyCode::Char('t') => {
@@ -800,6 +852,18 @@ impl App {
                         self.on_toogle_pid_view_event();
                     };
                 }
+                _ => {}
+            }
+        }
+    }
+
+    fn handle_events(&mut self) {
+        if let Ok(true) = event::poll(Duration::from_millis(100))
+            && let Ok(event) = event::read()
+        {
+            match event {
+                event::Event::Mouse(mouse_event) => self.on_mouse_event(mouse_event),
+                event::Event::Key(_) => self.on_key_event(event),
                 _ => {}
             }
         }
