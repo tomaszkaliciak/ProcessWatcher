@@ -1,5 +1,6 @@
 use crate::models::{MemCpuHistory, ProcessHistory, ProcessInfo, RingBuffer};
 use crate::monitor::InfoReceiver;
+use cli_log::info;
 use crossterm::event::{
     self, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -75,6 +76,13 @@ enum InputMode {
 }
 
 #[derive(Debug, Default)]
+struct SearchState {
+    current_input: Input,
+    current_match_idx: Option<usize>,
+    matched_rows: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
 pub struct App {
     totalram: u64,
     uptime: u64,
@@ -90,8 +98,7 @@ pub struct App {
     process_display_kind: ProcessDisplayKind,
     current_input_mode: InputMode,
     current_filter_input: Input,
-    current_search_input: Input,
-    row_selected_in_search: u64,
+    search_state: SearchState,
     table_area: Rect,
     column_areas: Vec<Rect>,
     table_state: TableState,
@@ -227,6 +234,10 @@ impl App {
 
                 self.proc_info = new_proc_info;
             }
+        }
+
+        if self.search_state.is_active() {
+            self.search_state.calculate_matching_rows(&self.proc_info);
         }
     }
 
@@ -380,7 +391,12 @@ impl App {
         if self.current_input_mode == InputMode::EditingFilter {
             self.render_text_input(frame, &self.current_filter_input, "Filter: ", chunks[4]);
         } else if self.current_input_mode == InputMode::EditingSearch {
-            self.render_text_input(frame, &self.current_search_input, "Search: ", chunks[4]);
+            self.render_text_input(
+                frame,
+                &self.search_state.current_input,
+                "Search: ",
+                chunks[4],
+            );
         }
 
         let paragraph = Paragraph::new(counter_text).centered().block(block);
@@ -399,10 +415,6 @@ impl App {
 
                 let is_filter_mode_active = !self.current_filter_input.to_string().is_empty();
 
-                let is_search_mode_active = !self.current_search_input.to_string().is_empty();
-
-                let mut search_found = false;
-
                 for (idx, proc_info) in self.proc_info.iter().enumerate() {
                     if is_filter_mode_active
                         && !proc_info
@@ -412,15 +424,13 @@ impl App {
                         continue;
                     }
 
-                    if is_search_mode_active
-                        && !search_found
-                        && idx >= self.row_selected_in_search as usize
-                        && proc_info
-                            .command
-                            .contains(self.current_search_input.to_string().as_str())
+                    info!("IS_ACTIVE {:?}", self.search_state.is_active());
+                    info!("get_current {:?}", self.search_state.get_current());
+
+                    if self.search_state.is_active() && self.search_state.get_current() == Some(idx)
                     {
+                        info!("SELECT");
                         self.table_state.select(Some(idx));
-                        search_found = true;
                     }
 
                     let pid_row = if self.watched_pid == proc_info.pid {
@@ -770,29 +780,15 @@ impl App {
 
             if self.current_input_mode == InputMode::EditingSearch {
                 if key.code == KeyCode::Esc {
-                    self.current_search_input.reset();
+                    self.search_state.clear();
                     self.current_input_mode = InputMode::Normal;
                 } else if key.code == KeyCode::Down {
-                    if self.row_selected_in_search > 1
-                        && let Some(result) = self
-                            .proc_info
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .skip(self.proc_info.len() - self.row_selected_in_search as usize)
-                            .find(|(_, x)| {
-                                x.command
-                                    .contains(self.current_search_input.to_string().as_str())
-                            })
-                    {
-                        self.row_selected_in_search = result.0 as u64;
-                    }
+                    self.search_state.seek_next();
                 } else if key.code == KeyCode::Up {
-                    if (self.row_selected_in_search as usize) < self.proc_info.len() {
-                        self.row_selected_in_search += 1;
-                    }
+                    self.search_state.seek_previous();
                 } else {
-                    self.current_search_input.handle_event(&event);
+                    self.search_state.current_input.handle_event(&event);
+                    self.search_state.calculate_matching_rows(&self.proc_info);
                 }
 
                 return;
@@ -878,5 +874,59 @@ impl App {
 
     fn exit(&mut self) {
         self.exit = true;
+    }
+}
+
+impl SearchState {
+    pub fn is_active(&self) -> bool {
+        !self.current_input.to_string().is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.current_match_idx = None;
+        self.matched_rows.clear();
+        self.current_input.reset();
+    }
+
+    pub fn calculate_matching_rows(&mut self, proc_info: &[ProcessInfo]) {
+        self.matched_rows = proc_info
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry
+                    .command
+                    .contains(self.current_input.to_string().as_str())
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+    }
+
+    pub fn get_current(&mut self) -> Option<usize> {
+        if let None = self.current_match_idx
+            && !self.matched_rows.is_empty()
+        {
+            self.current_match_idx = Some(0);
+        }
+
+        if let Some(current_idx) = self.current_match_idx {
+            return self.matched_rows.get(current_idx).cloned();
+        }
+        None
+    }
+
+    pub fn seek_next(&mut self) {
+        if let Some(currently_matched) = self.current_match_idx
+            && currently_matched + 1 < self.matched_rows.len()
+        {
+            self.current_match_idx = Some(currently_matched + 1);
+        }
+    }
+
+    pub fn seek_previous(&mut self) {
+        if let Some(currently_matched) = self.current_match_idx
+            && currently_matched > 0
+        {
+            self.current_match_idx = Some(currently_matched - 1);
+        }
     }
 }
