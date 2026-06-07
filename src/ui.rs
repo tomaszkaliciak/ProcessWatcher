@@ -1,6 +1,5 @@
 use crate::models::{MemCpuHistory, ProcessHistory, ProcessInfo, RingBuffer};
 use crate::monitor::InfoReceiver;
-use cli_log::info;
 use crossterm::event::{
     self, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -84,7 +83,8 @@ pub struct App {
     cpu_usage: BTreeMap<String, f32>,
     proc_info: Vec<ProcessInfo>,
     table_order_settings: TableOrderSettings,
-    watched_pid: Option<ProcessHistory>,
+    watched_pid_history: Option<ProcessHistory>,
+    watched_pid: u64,
     cpu_history: MemCpuHistory,
     current_screen: CurrentScreen,
     process_display_kind: ProcessDisplayKind,
@@ -136,7 +136,7 @@ impl App {
 
                 self.cpu_history.history.push(result.mem_cpu_stats);
 
-                if let Some(currently_observered_pid) = &mut self.watched_pid
+                if let Some(currently_observered_pid) = &mut self.watched_pid_history
                     && let Some(intresting_pid) = self
                         .proc_info
                         .iter()
@@ -423,8 +423,14 @@ impl App {
                         search_found = true;
                     }
 
+                    let pid_row = if self.watched_pid == proc_info.pid {
+                        "<w>".to_string() + proc_info.pid.to_string().as_str()
+                    } else {
+                        proc_info.pid.to_string()
+                    };
+
                     rows.push(Row::new([
-                        proc_info.pid.to_string(),
+                        pid_row,
                         proc_info.status.vm_size.to_string(),
                         proc_info.status.vm_rss.to_string(),
                         proc_info.status.rss_shem.to_string(),
@@ -480,7 +486,7 @@ impl App {
                 }
 
                 let widths = [
-                    Constraint::Max(6),
+                    Constraint::Max(10),
                     Constraint::Max(12),
                     Constraint::Max(12),
                     Constraint::Max(10),
@@ -596,7 +602,7 @@ impl App {
                 }
             }
             CurrentScreen::Watch => {
-                if let Some(observed_pid) = &self.watched_pid {
+                if let Some(observed_pid) = &self.watched_pid_history {
                     let data: Vec<(u64, u64, u64, f32, f32)> = observed_pid
                         .history
                         .buf
@@ -666,13 +672,14 @@ impl App {
         if let Some(idx) = self.table_state.selected_cell()
             && let Some(selected_process) = self.proc_info.get(idx.0)
         {
-            if let Some(currently_observered_pid) = &self.watched_pid
+            if let Some(currently_observered_pid) = &self.watched_pid_history
                 && currently_observered_pid.pid == selected_process.pid
             {
                 return;
             }
 
-            self.watched_pid = Some(ProcessHistory {
+            self.watched_pid = selected_process.pid;
+            self.watched_pid_history = Some(ProcessHistory {
                 pid: selected_process.pid,
                 history: RingBuffer::new(200),
             });
