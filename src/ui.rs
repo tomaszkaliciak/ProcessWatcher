@@ -1,5 +1,6 @@
 use crate::models::{MemCpuHistory, ProcessHistory, ProcessInfo, RingBuffer};
 use crate::monitor::InfoReceiver;
+use crate::ui::CurrentScreen::{WatchSaveFileConfirm, WatchSaveFileProvidePath};
 use cli_log::info;
 use crossterm::event::{
     self, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEvent, MouseEventKind,
@@ -103,18 +104,17 @@ pub struct App {
     table_area: Rect,
     column_areas: Vec<Rect>,
     table_state: TableState,
-    save_file_popup_active: bool,
     save_watched_pid_filename_input: Input,
-    save_file_popup_exit: bool,
     exit: bool,
 }
-
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub enum CurrentScreen {
     #[default]
     Main,
     Plots,
     Watch,
+    WatchSaveFileProvidePath,
+    WatchSaveFileConfirm,
 }
 
 impl App {
@@ -339,6 +339,7 @@ impl App {
                     "<s>,".blue().bold(),
                 ]);
             }
+            _ => {}
         }
 
         intructions.append(&mut vec![" Quit ".into(), "<Q> ".blue().bold()]);
@@ -430,12 +431,8 @@ impl App {
                         continue;
                     }
 
-                    info!("IS_ACTIVE {:?}", self.search_state.is_active());
-                    info!("get_current {:?}", self.search_state.get_current());
-
                     if self.search_state.is_active() && self.search_state.get_current() == Some(idx)
                     {
-                        info!("SELECT");
                         self.table_state.select(Some(idx));
                     }
 
@@ -661,43 +658,41 @@ impl App {
                         .highlight_symbol("() ");
 
                     frame.render_widget(table, chunks[1]);
-
-                    if self.save_file_popup_active {
-                        if self.save_file_popup_exit {
-                            let popup_block = Block::default()
-                                .title("Y/N")
-                                .borders(Borders::NONE)
-                                .style(Style::default().bg(Color::DarkGray));
-
-                            let exit_text = Text::styled(
-                                format!(
-                                    "Are you sure that you want to save output to :`{}`? (Y/N)",
-                                    self.save_watched_pid_filename_input,
-                                ),
-                                Style::default().fg(Color::Red),
-                            );
-
-                            let exit_paragraph = Paragraph::new(exit_text)
-                                .block(popup_block)
-                                .wrap(Wrap { trim: false });
-
-                            let area = centered_rect(60, 25, frame.area());
-                            frame.render_widget(exit_paragraph, area);
-                        } else {
-                            let centered_area = frame
-                                .area()
-                                .centered(Constraint::Percentage(40), Constraint::Percentage(5));
-                            frame.render_widget(Clear, centered_area);
-
-                            self.render_text_input(
-                                frame,
-                                &self.save_watched_pid_filename_input,
-                                "Enter filename. Press OK to confirm, ESC to cancel",
-                                centered_area,
-                            );
-                        }
-                    }
                 }
+            }
+            WatchSaveFileProvidePath => {
+                let centered_area = frame
+                    .area()
+                    .centered(Constraint::Percentage(40), Constraint::Percentage(5));
+                frame.render_widget(Clear, centered_area);
+
+                self.render_text_input(
+                    frame,
+                    &self.save_watched_pid_filename_input,
+                    "Enter filename. Press OK to confirm, ESC to cancel",
+                    centered_area,
+                );
+            }
+            WatchSaveFileConfirm => {
+                let popup_block = Block::default()
+                    .title("Y/N")
+                    .borders(Borders::NONE)
+                    .style(Style::default().bg(Color::DarkGray));
+
+                let exit_text = Text::styled(
+                    format!(
+                        "Are you sure that you want to save output to :`{}`? (Y/N)",
+                        self.save_watched_pid_filename_input,
+                    ),
+                    Style::default().fg(Color::Red),
+                );
+
+                let exit_paragraph = Paragraph::new(exit_text)
+                    .block(popup_block)
+                    .wrap(Wrap { trim: false });
+
+                let area = centered_rect(60, 25, frame.area());
+                frame.render_widget(exit_paragraph, area);
             }
         }
     }
@@ -862,24 +857,23 @@ impl App {
 
     fn on_key_event(&mut self, event: Event) {
         if let Event::Key(key) = event {
-            if self.save_file_popup_exit {
+            if self.current_screen == CurrentScreen::WatchSaveFileConfirm {
                 if key.code == KeyCode::Char('y') || key.code == KeyCode::Char('Y') {
                     self.save();
                     self.save_watched_pid_filename_input.reset();
-                    self.save_file_popup_active = false;
-                    self.save_file_popup_exit = false;
+                    self.current_screen = CurrentScreen::Watch;
                 } else if key.code == KeyCode::Char('n') || key.code == KeyCode::Char('N') {
-                    self.save_file_popup_exit = false;
+                    self.current_screen = CurrentScreen::WatchSaveFileProvidePath;
                 }
-            } else if self.save_file_popup_active {
+            } else if self.current_screen == CurrentScreen::WatchSaveFileProvidePath {
                 if key.code == KeyCode::Esc {
                     self.save_watched_pid_filename_input.reset();
-                    self.save_file_popup_active = false;
+                    self.current_screen = CurrentScreen::Watch;
                 } else if key.code == KeyCode::Enter
                     && !self.save_watched_pid_filename_input.to_string().is_empty()
                     && Self::is_csv_path_correct(self.save_watched_pid_filename_input.value())
                 {
-                    self.save_file_popup_exit = true;
+                    self.current_screen = CurrentScreen::WatchSaveFileConfirm;
                 } else {
                     self.save_watched_pid_filename_input.handle_event(&event);
                 }
@@ -936,7 +930,7 @@ impl App {
                         if let CurrentScreen::Main = self.current_screen {
                             self.current_input_mode = InputMode::EditingSearch;
                         } else if let CurrentScreen::Watch = self.current_screen {
-                            self.save_file_popup_active = true;
+                            self.current_screen = CurrentScreen::WatchSaveFileProvidePath;
                         };
                     }
                     KeyCode::Esc => {
