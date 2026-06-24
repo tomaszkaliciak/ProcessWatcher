@@ -1,6 +1,5 @@
 use crate::models::{MemCpuHistory, ProcessHistory, ProcessInfo, RingBuffer};
 use crate::monitor::InfoReceiver;
-use crate::ui::CurrentScreen::{WatchSaveFileConfirm, WatchSaveFileProvidePath};
 use cli_log::info;
 use crossterm::event::{
     self, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEvent, MouseEventKind,
@@ -339,10 +338,22 @@ impl App {
                     "<s>,".blue().bold(),
                 ]);
             }
-            _ => {}
+            CurrentScreen::WatchSaveFileProvidePath => {}
+            CurrentScreen::WatchSaveFileConfirm => {
+                intructions.append(&mut vec![
+                    " Confirm ".into(),
+                    "<Y>,".blue().bold(),
+                    " Cancel ".into(),
+                    "<N>,".blue().bold(),
+                ]);
+            }
         }
 
-        intructions.append(&mut vec![" Quit ".into(), "<Q> ".blue().bold()]);
+        if self.current_screen != CurrentScreen::WatchSaveFileProvidePath
+            && self.current_screen != CurrentScreen::WatchSaveFileConfirm
+        {
+            intructions.append(&mut vec![" Quit ".into(), "<Q> ".blue().bold()]);
+        }
 
         let instructions = Line::from(intructions);
 
@@ -660,7 +671,7 @@ impl App {
                     frame.render_widget(table, chunks[1]);
                 }
             }
-            WatchSaveFileProvidePath => {
+            CurrentScreen::WatchSaveFileProvidePath => {
                 let centered_area = frame
                     .area()
                     .centered(Constraint::Percentage(40), Constraint::Percentage(5));
@@ -673,7 +684,7 @@ impl App {
                     centered_area,
                 );
             }
-            WatchSaveFileConfirm => {
+            CurrentScreen::WatchSaveFileConfirm => {
                 let popup_block = Block::default()
                     .title("Y/N")
                     .borders(Borders::NONE)
