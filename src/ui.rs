@@ -8,7 +8,7 @@ use crossterm::execute;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::symbols::{self, Marker};
-use ratatui::widgets::{Axis, Chart, GraphType};
+use ratatui::widgets::{Axis, Borders, Chart, Clear, GraphType, Wrap};
 use ratatui::{
     DefaultTerminal, Frame,
     style::{Modifier, Style, Stylize},
@@ -17,7 +17,8 @@ use ratatui::{
     widgets::{Block, Dataset, Gauge, List, ListItem, Paragraph, Row, Table, TableState},
 };
 use std::collections::{BTreeMap, HashMap};
-use std::io;
+use std::fs::{OpenOptions, metadata};
+use std::io::{self, BufWriter, Write};
 use std::time::Duration;
 
 use tui_input::Input;
@@ -102,6 +103,9 @@ pub struct App {
     table_area: Rect,
     column_areas: Vec<Rect>,
     table_state: TableState,
+    save_file_popup_active: bool,
+    save_watched_pid_filename_input: Input,
+    save_file_popup_exit: bool,
     exit: bool,
 }
 
@@ -331,6 +335,8 @@ impl App {
                     "<m>,".blue().bold(),
                     " CPU usage plots ".into(),
                     "<p>,".blue().bold(),
+                    " Save data ".into(),
+                    "<s>,".blue().bold(),
                 ]);
             }
         }
@@ -655,6 +661,42 @@ impl App {
                         .highlight_symbol("() ");
 
                     frame.render_widget(table, chunks[1]);
+
+                    if self.save_file_popup_active {
+                        if self.save_file_popup_exit {
+                            let popup_block = Block::default()
+                                .title("Y/N")
+                                .borders(Borders::NONE)
+                                .style(Style::default().bg(Color::DarkGray));
+
+                            let exit_text = Text::styled(
+                                format!(
+                                    "Are you sure that you want to save output to :`{}`? (Y/N)",
+                                    self.save_watched_pid_filename_input,
+                                ),
+                                Style::default().fg(Color::Red),
+                            );
+
+                            let exit_paragraph = Paragraph::new(exit_text)
+                                .block(popup_block)
+                                .wrap(Wrap { trim: false });
+
+                            let area = centered_rect(60, 25, frame.area());
+                            frame.render_widget(exit_paragraph, area);
+                        } else {
+                            let centered_area = frame
+                                .area()
+                                .centered(Constraint::Percentage(40), Constraint::Percentage(5));
+                            frame.render_widget(Clear, centered_area);
+
+                            self.render_text_input(
+                                frame,
+                                &self.save_watched_pid_filename_input,
+                                "Enter filename. Press OK to confirm, ESC to cancel",
+                                centered_area,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -763,9 +805,85 @@ impl App {
         }
     }
 
+    fn is_csv_path_correct(path: &str) -> bool {
+        if let Ok(path_info) = metadata(path) {
+            if path_info.is_file() {
+                return true;
+            } else if path_info.is_dir() {
+                return false;
+            }
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path);
+
+        file.is_ok()
+    }
+
+    fn save(&mut self) {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.save_watched_pid_filename_input.to_string());
+
+        if file.is_err() || self.watched_pid_history.is_none() {
+            return;
+        }
+
+        let mut writer = BufWriter::new(file.unwrap());
+
+        let _ = writeln!(writer, "VM_SIZE, VM_RSS, RSS_SHEM, RSS_PROC, CPU USAGE");
+
+        for entry in self
+            .watched_pid_history
+            .as_ref()
+            .unwrap()
+            .history
+            .buf
+            .iter()
+        {
+            let _ = writer.write_all(
+                format!(
+                    "{}, {}, {},{}, {}\n",
+                    entry.vm_size, entry.vm_rss, entry.rss_shem, entry.rss_proc, entry.cpu_usage
+                )
+                .as_bytes(),
+            );
+        }
+
+        writer.flush().unwrap();
+    }
+
     fn on_key_event(&mut self, event: Event) {
         if let Event::Key(key) = event {
-            if self.current_input_mode == InputMode::EditingFilter {
+            if self.save_file_popup_exit {
+                if key.code == KeyCode::Char('y') || key.code == KeyCode::Char('Y') {
+                    self.save();
+                    self.save_watched_pid_filename_input.reset();
+                    self.save_file_popup_active = false;
+                    self.save_file_popup_exit = false;
+                } else if key.code == KeyCode::Char('n') || key.code == KeyCode::Char('N') {
+                    self.save_file_popup_exit = false;
+                }
+            } else if self.save_file_popup_active {
+                if key.code == KeyCode::Esc {
+                    self.save_watched_pid_filename_input.reset();
+                    self.save_file_popup_active = false;
+                } else if key.code == KeyCode::Enter
+                    && !self.save_watched_pid_filename_input.to_string().is_empty()
+                    && Self::is_csv_path_correct(self.save_watched_pid_filename_input.value())
+                {
+                    self.save_file_popup_exit = true;
+                } else {
+                    self.save_watched_pid_filename_input.handle_event(&event);
+                }
+            } else if self.current_input_mode == InputMode::EditingFilter {
                 if key.code == KeyCode::Esc {
                     self.current_filter_input.reset();
                     self.current_input_mode = InputMode::Normal;
@@ -774,11 +892,7 @@ impl App {
                 } else {
                     self.current_filter_input.handle_event(&event);
                 }
-
-                return;
-            }
-
-            if self.current_input_mode == InputMode::EditingSearch {
+            } else if self.current_input_mode == InputMode::EditingSearch {
                 if key.code == KeyCode::Esc {
                     self.search_state.clear();
                     self.current_input_mode = InputMode::Normal;
@@ -790,72 +904,72 @@ impl App {
                     self.search_state.current_input.handle_event(&event);
                     self.search_state.calculate_matching_rows(&self.proc_info);
                 }
-
-                return;
-            }
-
-            match key.code {
-                KeyCode::Char('q') => self.exit(),
-                KeyCode::Down => {
-                    if let CurrentScreen::Main = self.current_screen {
-                        self.table_state.select_next();
-                    };
-                }
-                KeyCode::Up => {
-                    if let CurrentScreen::Main = self.current_screen {
-                        self.table_state.select_previous();
+            } else {
+                match key.code {
+                    KeyCode::Char('q') => self.exit(),
+                    KeyCode::Down => {
+                        if let CurrentScreen::Main = self.current_screen {
+                            self.table_state.select_next();
+                        };
                     }
-                }
-                KeyCode::Right => {
-                    if let CurrentScreen::Main = self.current_screen {
-                        self.table_state.select_next_column();
+                    KeyCode::Up => {
+                        if let CurrentScreen::Main = self.current_screen {
+                            self.table_state.select_previous();
+                        }
                     }
-                }
-                KeyCode::Left => {
-                    if let CurrentScreen::Main = self.current_screen {
-                        self.table_state.select_previous_column();
+                    KeyCode::Right => {
+                        if let CurrentScreen::Main = self.current_screen {
+                            self.table_state.select_next_column();
+                        }
                     }
-                }
-                KeyCode::Char('f') => {
-                    if let CurrentScreen::Main = self.current_screen {
-                        self.current_input_mode = InputMode::EditingFilter;
-                    };
-                }
-                KeyCode::Char('s') => {
-                    if let CurrentScreen::Main = self.current_screen {
-                        self.current_input_mode = InputMode::EditingSearch;
-                    };
-                }
-                KeyCode::Esc => {
-                    if let CurrentScreen::Main = self.current_screen {
-                        self.current_input_mode = InputMode::Normal;
-                    };
-                }
-                KeyCode::Char('l') => {
-                    self.current_screen = CurrentScreen::Watch;
-                }
-                KeyCode::Char('m') => {
-                    self.current_screen = CurrentScreen::Main;
-                }
-                KeyCode::Char('p') => {
-                    self.current_screen = CurrentScreen::Plots;
-                }
-                KeyCode::Char('r') => {
-                    if let CurrentScreen::Main = self.current_screen {
-                        self.on_sort_requested_event();
+                    KeyCode::Left => {
+                        if let CurrentScreen::Main = self.current_screen {
+                            self.table_state.select_previous_column();
+                        }
                     }
-                }
-                KeyCode::Char('w') => {
-                    if let CurrentScreen::Main = self.current_screen {
-                        self.on_watch_pid_event();
+                    KeyCode::Char('f') => {
+                        if let CurrentScreen::Main = self.current_screen {
+                            self.current_input_mode = InputMode::EditingFilter;
+                        };
                     }
+                    KeyCode::Char('s') => {
+                        if let CurrentScreen::Main = self.current_screen {
+                            self.current_input_mode = InputMode::EditingSearch;
+                        } else if let CurrentScreen::Watch = self.current_screen {
+                            self.save_file_popup_active = true;
+                        };
+                    }
+                    KeyCode::Esc => {
+                        if let CurrentScreen::Main = self.current_screen {
+                            self.current_input_mode = InputMode::Normal;
+                        };
+                    }
+                    KeyCode::Char('l') => {
+                        self.current_screen = CurrentScreen::Watch;
+                    }
+                    KeyCode::Char('m') => {
+                        self.current_screen = CurrentScreen::Main;
+                    }
+                    KeyCode::Char('p') => {
+                        self.current_screen = CurrentScreen::Plots;
+                    }
+                    KeyCode::Char('r') => {
+                        if let CurrentScreen::Main = self.current_screen {
+                            self.on_sort_requested_event();
+                        }
+                    }
+                    KeyCode::Char('w') => {
+                        if let CurrentScreen::Main = self.current_screen {
+                            self.on_watch_pid_event();
+                        }
+                    }
+                    KeyCode::Char('t') => {
+                        if let CurrentScreen::Main = self.current_screen {
+                            self.on_toogle_pid_view_event();
+                        };
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('t') => {
-                    if let CurrentScreen::Main = self.current_screen {
-                        self.on_toogle_pid_view_event();
-                    };
-                }
-                _ => {}
             }
         }
     }
@@ -929,4 +1043,24 @@ impl SearchState {
             self.current_match_idx = Some(currently_matched - 1);
         }
     }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
