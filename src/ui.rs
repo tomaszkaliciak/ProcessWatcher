@@ -92,8 +92,7 @@ pub struct App {
     cpu_usage: BTreeMap<String, f32>,
     proc_info: Vec<ProcessInfo>,
     table_order_settings: TableOrderSettings,
-    watched_pid_history: Option<ProcessHistory>,
-    watched_pid: u64,
+    watched_pid_history: Vec<(ProcessHistory)>,
     cpu_history: MemCpuHistory,
     current_screen: CurrentScreen,
     process_display_kind: ProcessDisplayKind,
@@ -146,13 +145,12 @@ impl App {
 
                 self.cpu_history.history.push(result.mem_cpu_stats);
 
-                if let Some(currently_observered_pid) = &mut self.watched_pid_history
-                    && let Some(intresting_pid) = self
-                        .proc_info
-                        .iter()
-                        .find(|x| x.pid == currently_observered_pid.pid)
-                {
-                    currently_observered_pid.history.push(intresting_pid.status);
+                for pid_history in &mut self.watched_pid_history {
+                    if let Some(intresting_pid_info) =
+                        self.proc_info.iter().find(|x| x.pid == pid_history.pid)
+                    {
+                        pid_history.history.push(intresting_pid_info.status);
+                    }
                 }
             }
         }
@@ -447,7 +445,12 @@ impl App {
                         self.table_state.select(Some(idx));
                     }
 
-                    let pid_row = if self.watched_pid == proc_info.pid {
+                    let pid_row = if !self
+                        .watched_pid_history
+                        .iter()
+                        .find(|x| x.pid == proc_info.pid)
+                        .is_none()
+                    {
                         "<w>".to_string() + proc_info.pid.to_string().as_str()
                     } else {
                         proc_info.pid.to_string()
@@ -626,18 +629,34 @@ impl App {
                 }
             }
             CurrentScreen::Watch => {
-                if let Some(observed_pid) = &self.watched_pid_history {
-                    let data: Vec<(u64, u64, u64, f32, f32)> = observed_pid
-                        .history
-                        .buf
+                if !self.watched_pid_history.is_empty() {
+                    let data: Vec<(u64, u64, u64, u64, f32, f32)> = self
+                        .watched_pid_history
                         .iter()
-                        .map(|x| (x.vm_size, x.vm_rss, x.rss_shem, x.rss_proc, x.cpu_usage))
+                        .flat_map(|proc| {
+                            proc.history.buf.iter().clone().map(|x| {
+                                (
+                                    proc.pid,
+                                    x.vm_size,
+                                    x.vm_rss,
+                                    x.rss_shem,
+                                    x.rss_proc,
+                                    x.cpu_usage,
+                                )
+                            })
+                        })
                         .collect();
 
-                    let header =
-                        Row::new(["VM_SIZE", "VM_RSS", "RSS_SHEM", "RSS_PROC", "CPU USAGE"])
-                            .style(Style::new().bold())
-                            .bottom_margin(1);
+                    let header = Row::new([
+                        "PID",
+                        "VM_SIZE",
+                        "VM_RSS",
+                        "RSS_SHEM",
+                        "RSS_PROC",
+                        "CPU USAGE",
+                    ])
+                    .style(Style::new().bold())
+                    .bottom_margin(1);
 
                     let mut rows: Vec<Row> = Vec::new();
 
@@ -648,6 +667,7 @@ impl App {
                             entry.2.to_string(),
                             entry.3.to_string(),
                             entry.4.to_string(),
+                            entry.5.to_string(),
                         ]));
                     }
 
@@ -655,6 +675,7 @@ impl App {
                         Constraint::Max(12),
                         Constraint::Max(12),
                         Constraint::Max(12),
+                        Constraint::Max(10),
                         Constraint::Max(10),
                         Constraint::Max(10),
                     ];
@@ -730,17 +751,18 @@ impl App {
         if let Some(idx) = self.table_state.selected_cell()
             && let Some(selected_process) = self.proc_info.get(idx.0)
         {
-            if let Some(currently_observered_pid) = &self.watched_pid_history
-                && currently_observered_pid.pid == selected_process.pid
+            if let Some(index) = self
+                .watched_pid_history
+                .iter()
+                .position(|x| x.pid == selected_process.pid)
             {
-                return;
+                let _ = self.watched_pid_history.swap_remove(index);
+            } else {
+                self.watched_pid_history.push(ProcessHistory {
+                    pid: selected_process.pid,
+                    history: RingBuffer::new(200),
+                });
             }
-
-            self.watched_pid = selected_process.pid;
-            self.watched_pid_history = Some(ProcessHistory {
-                pid: selected_process.pid,
-                history: RingBuffer::new(200),
-            });
         }
     }
 
@@ -838,7 +860,7 @@ impl App {
             .truncate(false)
             .open(self.save_watched_pid_filename_input.to_string());
 
-        if file.is_err() || self.watched_pid_history.is_none() {
+        if file.is_err() || self.watched_pid_history.is_empty() {
             return;
         }
 
@@ -846,21 +868,23 @@ impl App {
 
         let _ = writeln!(writer, "VM_SIZE, VM_RSS, RSS_SHEM, RSS_PROC, CPU USAGE");
 
-        for entry in self
-            .watched_pid_history
-            .as_ref()
-            .unwrap()
-            .history
-            .buf
-            .iter()
-        {
-            let _ = writer.write_all(
-                format!(
-                    "{}, {}, {},{}, {}\n",
-                    entry.vm_size, entry.vm_rss, entry.rss_shem, entry.rss_proc, entry.cpu_usage
-                )
-                .as_bytes(),
-            );
+        for entry in self.watched_pid_history.iter() {
+            let pid = entry.pid;
+
+            for elem in &entry.history.buf {
+                let _ = writer.write_all(
+                    format!(
+                        "{}, {}, {}, {},{}, {}\n",
+                        pid,
+                        elem.vm_size,
+                        elem.vm_rss,
+                        elem.rss_shem,
+                        elem.rss_proc,
+                        elem.cpu_usage
+                    )
+                    .as_bytes(),
+                );
+            }
         }
 
         writer.flush().unwrap();
