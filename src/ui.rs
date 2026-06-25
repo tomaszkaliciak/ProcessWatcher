@@ -1,4 +1,4 @@
-use crate::models::{MemCpuHistory, ProcessHistory, ProcessInfo, RingBuffer};
+use crate::models::{MemCpuHistory, ProcessHistory, ProcessHistorySample, ProcessInfo, RingBuffer};
 use crate::monitor::InfoReceiver;
 use cli_log::info;
 use crossterm::event::{
@@ -19,7 +19,7 @@ use ratatui::{
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{OpenOptions, metadata};
 use std::io::{self, BufWriter, Write};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
@@ -92,7 +92,7 @@ pub struct App {
     cpu_usage: BTreeMap<String, f32>,
     proc_info: Vec<ProcessInfo>,
     table_order_settings: TableOrderSettings,
-    watched_pid_history: Vec<(ProcessHistory)>,
+    watched_pid_history: Vec<ProcessHistory>,
     cpu_history: MemCpuHistory,
     current_screen: CurrentScreen,
     process_display_kind: ProcessDisplayKind,
@@ -145,11 +145,19 @@ impl App {
 
                 self.cpu_history.history.push(result.mem_cpu_stats);
 
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
                 for pid_history in &mut self.watched_pid_history {
                     if let Some(intresting_pid_info) =
                         self.proc_info.iter().find(|x| x.pid == pid_history.pid)
                     {
-                        pid_history.history.push(intresting_pid_info.status);
+                        pid_history.history.push(ProcessHistorySample {
+                            timestamp: now,
+                            status: intresting_pid_info.status,
+                        });
                     }
                 }
             }
@@ -630,18 +638,19 @@ impl App {
             }
             CurrentScreen::Watch => {
                 if !self.watched_pid_history.is_empty() {
-                    let data: Vec<(u64, u64, u64, u64, f32, f32)> = self
+                    let data: Vec<(u64, u64, u64, u64, u64, f32, f32)> = self
                         .watched_pid_history
                         .iter()
                         .flat_map(|proc| {
                             proc.history.buf.iter().clone().map(|x| {
                                 (
                                     proc.pid,
-                                    x.vm_size,
-                                    x.vm_rss,
-                                    x.rss_shem,
-                                    x.rss_proc,
-                                    x.cpu_usage,
+                                    x.timestamp,
+                                    x.status.vm_size,
+                                    x.status.vm_rss,
+                                    x.status.rss_shem,
+                                    x.status.rss_proc,
+                                    x.status.cpu_usage,
                                 )
                             })
                         })
@@ -649,6 +658,7 @@ impl App {
 
                     let header = Row::new([
                         "PID",
+                        "Timestamp",
                         "VM_SIZE",
                         "VM_RSS",
                         "RSS_SHEM",
@@ -668,6 +678,7 @@ impl App {
                             entry.3.to_string(),
                             entry.4.to_string(),
                             entry.5.to_string(),
+                            entry.6.to_string(),
                         ]));
                     }
 
@@ -675,6 +686,7 @@ impl App {
                         Constraint::Max(12),
                         Constraint::Max(12),
                         Constraint::Max(12),
+                        Constraint::Max(10),
                         Constraint::Max(10),
                         Constraint::Max(10),
                         Constraint::Max(10),
@@ -866,7 +878,10 @@ impl App {
 
         let mut writer = BufWriter::new(file.unwrap());
 
-        let _ = writeln!(writer, "VM_SIZE, VM_RSS, RSS_SHEM, RSS_PROC, CPU USAGE");
+        let _ = writeln!(
+            writer,
+            "PID_ID, timestamp, VM_SIZE, VM_RSS, RSS_SHEM, RSS_PROC, CPU USAGE"
+        );
 
         for entry in self.watched_pid_history.iter() {
             let pid = entry.pid;
@@ -874,13 +889,14 @@ impl App {
             for elem in &entry.history.buf {
                 let _ = writer.write_all(
                     format!(
-                        "{}, {}, {}, {},{}, {}\n",
+                        "{}, {}, {}, {}, {},{}, {}\n",
                         pid,
-                        elem.vm_size,
-                        elem.vm_rss,
-                        elem.rss_shem,
-                        elem.rss_proc,
-                        elem.cpu_usage
+                        elem.timestamp,
+                        elem.status.vm_size,
+                        elem.status.vm_rss,
+                        elem.status.rss_shem,
+                        elem.status.rss_proc,
+                        elem.status.cpu_usage
                     )
                     .as_bytes(),
                 );

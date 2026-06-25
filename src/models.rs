@@ -23,9 +23,15 @@ impl<T> RingBuffer<T> {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct ProcessHistorySample {
+    pub status: ProcessStatus,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, PartialEq)]
 pub struct ProcessHistory {
     pub pid: u64,
-    pub history: RingBuffer<ProcessStatus>,
+    pub history: RingBuffer<ProcessHistorySample>,
 }
 
 #[derive(Debug, PartialEq, Default)]
