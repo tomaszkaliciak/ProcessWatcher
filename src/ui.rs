@@ -160,6 +160,9 @@ impl App {
                         });
                     }
                 }
+
+                self.watched_pid_history
+                    .retain(|pid_history| self.proc_info.iter().any(|p| p.pid == pid_history.pid));
             }
         }
         Ok(())
@@ -453,11 +456,10 @@ impl App {
                         self.table_state.select(Some(idx));
                     }
 
-                    let pid_row = if !self
+                    let pid_row = if self
                         .watched_pid_history
                         .iter()
-                        .find(|x| x.pid == proc_info.pid)
-                        .is_none()
+                        .any(|x| x.pid == proc_info.pid)
                     {
                         "<w>".to_string() + proc_info.pid.to_string().as_str()
                     } else {
@@ -588,7 +590,7 @@ impl App {
                             format!(
                                 " {} usage: ({:>2.4})%",
                                 history.0,
-                                history.1.first().unwrap().1.to_string().as_str()
+                                history.1.first().map_or(0.0, |x| x.1).to_string().as_str()
                             )
                             .blue(),
                         )
@@ -865,6 +867,10 @@ impl App {
     }
 
     fn save(&mut self) {
+        if self.watched_pid_history.is_empty() {
+            return;
+        }
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -872,38 +878,36 @@ impl App {
             .truncate(false)
             .open(self.save_watched_pid_filename_input.to_string());
 
-        if file.is_err() || self.watched_pid_history.is_empty() {
-            return;
-        }
+        if let Ok(opened_file) = file {
+            let mut writer = BufWriter::new(opened_file);
 
-        let mut writer = BufWriter::new(file.unwrap());
+            let _ = writeln!(
+                writer,
+                "PID_ID, timestamp, VM_SIZE, VM_RSS, RSS_SHEM, RSS_PROC, CPU USAGE"
+            );
 
-        let _ = writeln!(
-            writer,
-            "PID_ID, timestamp, VM_SIZE, VM_RSS, RSS_SHEM, RSS_PROC, CPU USAGE"
-        );
+            for entry in self.watched_pid_history.iter() {
+                let pid = entry.pid;
 
-        for entry in self.watched_pid_history.iter() {
-            let pid = entry.pid;
-
-            for elem in &entry.history.buf {
-                let _ = writer.write_all(
-                    format!(
-                        "{}, {}, {}, {}, {},{}, {}\n",
-                        pid,
-                        elem.timestamp,
-                        elem.status.vm_size,
-                        elem.status.vm_rss,
-                        elem.status.rss_shem,
-                        elem.status.rss_proc,
-                        elem.status.cpu_usage
-                    )
-                    .as_bytes(),
-                );
+                for elem in &entry.history.buf {
+                    let _ = writer.write_all(
+                        format!(
+                            "{}, {}, {}, {}, {},{}, {}\n",
+                            pid,
+                            elem.timestamp,
+                            elem.status.vm_size,
+                            elem.status.vm_rss,
+                            elem.status.rss_shem,
+                            elem.status.rss_proc,
+                            elem.status.cpu_usage
+                        )
+                        .as_bytes(),
+                    );
+                }
             }
-        }
 
-        writer.flush().unwrap();
+            _ = writer.flush();
+        }
     }
 
     fn on_key_event(&mut self, event: Event) {
