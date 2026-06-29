@@ -15,7 +15,7 @@ pub fn get_free_available_total_memory(input: String) -> (u64, u64, u64) {
             .nth(1)
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
-        match line.split(':').next().unwrap() {
+        match line.split(':').next().unwrap_or_default() {
             "MemTotal" => mem_total = val,
             "MemFree" => mem_free = val,
             "MemAvailable" => mem_available = val,
@@ -67,6 +67,7 @@ pub fn parse_proc_pid_stat_cpu_usage(
     pid_id: i32,
     input: String,
     elapsed_seconds: f32,
+    nb_processors: u64,
     cpu_proc_stat_cache: &mut HashMap<i32, ProcessCpuTime>,
 ) -> f32 {
     let splits: Vec<&str> = input.split_whitespace().collect();
@@ -76,8 +77,6 @@ pub fn parse_proc_pid_stat_cpu_usage(
             { (user_time.parse::<u64>(), system_time.parse::<u64>()) }
     {
         if let Some(entry) = cpu_proc_stat_cache.get(&pid_id) {
-            let nb_processors = 8;
-
             let delta_user = parsed_user_time.saturating_sub(entry.user_time);
             let delta_system = parsed_system_time.saturating_sub(entry.system_time);
 
@@ -129,7 +128,7 @@ pub async fn get_proc_stat_data(
         let mut contents = Vec::new();
         let _ = file.read_to_end(&mut contents).await;
 
-        let output2 = String::from_utf8(contents).unwrap();
+        let output2 = String::from_utf8(contents).unwrap_or_default();
 
         for line in output2.lines() {
             if !line.starts_with("cpu") {
@@ -172,7 +171,9 @@ pub async fn get_proc_stat_data(
 }
 
 pub async fn get_proc_uptime() -> u64 {
-    let file_content = tokio::fs::read_to_string("/proc/uptime").await.unwrap();
+    let file_content = tokio::fs::read_to_string("/proc/uptime")
+        .await
+        .unwrap_or_default();
 
     let system_uptime: u64 = file_content
         .split_whitespace()
@@ -203,14 +204,14 @@ pub struct CpuTimes {
 pub fn parse_cpu_times(line: &str) -> Result<CpuTimes, std::num::ParseIntError> {
     let mut iter = line.split_whitespace();
     Ok(CpuTimes {
-        cpu_name: iter.next().unwrap().to_owned(),
-        user: iter.next().unwrap().parse()?,
-        nice: iter.next().unwrap().parse()?,
-        system: iter.next().unwrap().parse()?,
-        idle: iter.next().unwrap().parse()?,
-        iowait: iter.next().unwrap().parse()?,
-        irq: iter.next().unwrap().parse()?,
-        softirq: iter.next().unwrap().parse()?,
-        steal: iter.next().unwrap().parse()?,
+        cpu_name: iter.next().unwrap_or_default().to_owned(),
+        user: iter.next().unwrap_or_default().parse()?,
+        nice: iter.next().unwrap_or_default().parse()?,
+        system: iter.next().unwrap_or_default().parse()?,
+        idle: iter.next().unwrap_or_default().parse()?,
+        iowait: iter.next().unwrap_or_default().parse()?,
+        irq: iter.next().unwrap_or_default().parse()?,
+        softirq: iter.next().unwrap_or_default().parse()?,
+        steal: iter.next().unwrap_or_default().parse()?,
     })
 }

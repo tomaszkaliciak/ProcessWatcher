@@ -5,6 +5,8 @@ use crate::parser::{
     get_free_available_total_memory, get_proc_stat_data, get_proc_uptime, parse_proc_pid_parent,
     parse_proc_pid_stat_cpu_usage, parse_proc_pid_stat_uptime, parse_proc_pid_status,
 };
+extern crate num_cpus;
+
 use std::collections::HashMap;
 use std::fs;
 use tokio::runtime::Builder;
@@ -20,6 +22,8 @@ impl InfoReceiver {
         let (send, recv) = mpsc::channel(10);
 
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
+
+        let num_cpus = num_cpus::get() as u64;
 
         _ = std::thread::Builder::new()
             .name("sysinfo-worker".to_string())
@@ -105,6 +109,7 @@ impl InfoReceiver {
                                         pid,
                                         stat,
                                         elapsed_seconds,
+                                        num_cpus,
                                         &mut cpu_proc_stat_cache,
                                     );
 
